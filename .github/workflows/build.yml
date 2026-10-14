@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: brew install llvm lld ninja vulkan-headers
+      - name: FEX and Klepton at their pinned commits, patched
+        run: tools/setup.sh
+      - name: Debian package cache
+        uses: actions/cache@v4
+        with:
+          path: build/.debs
+          key: debs-${{ hashFiles('tools/fetch_rootfs.py', 'Makefile') }}
+      - name: arm64 sysroot
+        run: make sysroot
+      - name: FEX (linux-arm64, libFEXInversa.so)
+        run: make fex
+      - name: Inversa
+        run: make
+      - name: Guest libraries and the x86-64 root
+        run: make rootfs
+      - name: Tests (build, and load without running)
+        run: |
+          make tests
+          build/Inversa.app/Contents/MacOS/inversa probe tests/build/hello_x64
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -C build -czf dist/inversa-macos-arm64.tar.gz Inversa.app lib/libFEXInversa.so lib/arm64-root rootfs/x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inversa-macos-arm64
+          path: dist/inversa-macos-arm64.tar.gz

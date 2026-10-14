@@ -1,0 +1,179 @@
+diff --git a/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp b/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp
+index 6e8df95..ce8e26c 100644
+--- a/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp
+@@ -276,7 +276,12 @@ DEF_OP(ProcessorID) {
+   // Node in x1
+   add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r1, ARMEmitter::Reg::rsp, 4);
+ 
++#ifdef FEX_INVERSA
++  // no getcpu under Inversa (a raw svc is a Darwin syscall): CPU 0, node 0
++  stp<ARMEmitter::IndexType::OFFSET>(ARMEmitter::WReg::zr, ARMEmitter::WReg::zr, ARMEmitter::Reg::rsp);
++#else
+   svc(0);
++#endif
+   // On updated signal mask we can receive a signal RIGHT HERE
+ 
+   // Load the values returned by the kernel
+diff --git a/Source/Common/HostFeatures.cpp b/Source/Common/HostFeatures.cpp
+index 858d76d..bcab933 100644
+--- a/Source/Common/HostFeatures.cpp
++++ b/Source/Common/HostFeatures.cpp
+@@ -613,6 +613,9 @@ FEXCore::HostFeatures FetchHostFeatures() {
+     Features.RemoveFeature(CPUFeatures::Feature::AFP);
+     // Vixl simulator doesn't support RPRES.
+     Features.RemoveFeature(CPUFeatures::Feature::RPRES);
++#elif defined(FEX_INVERSA)
++    LogMan::Msg::EFmt("Inversa: no CPUFeatureRegisters given, assuming baseline ARMv8.0");
++    Features = GetCPUFeaturesFromConfig("pfr0=0x11");
+ #else
+     Features = GetCPUFeaturesFromIDRegisters();
+ #endif
+@@ -620,7 +623,13 @@ FEXCore::HostFeatures FetchHostFeatures() {
+ 
+   uint64_t CTR = 0;
+   uint64_t MIDR = 0;
+-#if defined(ARCHITECTURE_arm64) && !defined(VIXL_SIMULATOR)
++#if defined(FEX_INVERSA)
++  // Darwin traps EL0 reads of ctr_el0 and midr_el1 (and the ID registers: Inversa passes those
++  // in through CPUFeatureRegisters). 128-byte data lines as hw.cachelinesize says, 64-byte
++  // instruction lines to stay on the safe side; no DIC/IDC, so caches are always maintained.
++  CTR = 0x8555c004;
++  MIDR = 0x610f0000;
++#elif defined(ARCHITECTURE_arm64) && !defined(VIXL_SIMULATOR)
+   // We need to get the CPU's cache line size
+   // We expect sane targets that have correct cacheline sizes across clusters
+   __asm volatile("mrs %[ctr], ctr_el0" : [ctr] "=r"(CTR));
+diff --git a/Source/Common/Linux/SBRKAllocations.cpp b/Source/Common/Linux/SBRKAllocations.cpp
+index ae366ee..95e7de4 100644
+--- a/Source/Common/Linux/SBRKAllocations.cpp
++++ b/Source/Common/Linux/SBRKAllocations.cpp
+@@ -17,6 +17,10 @@ namespace FEX::SBRKAllocations {
+ // glibc notices the sbrk failure and falls back to regular mmap based allocations when this occurs. Ensuring that memory can still be allocated.
+ void* DisableSBRKAllocations() {
+   void* INVALID_PTR = reinterpret_cast<void*>(~0ULL);
++#ifdef FEX_INVERSA
++  // Inversa: malloc is Darwin's, which never grows a brk heap
++  return INVALID_PTR;
++#endif
+   // Get the starting sbrk pointer.
+   void* StartingSBRK = sbrk(0);
+   if (StartingSBRK == INVALID_PTR) {
+diff --git a/Source/Tools/FEXInterpreter/CMakeLists.txt b/Source/Tools/FEXInterpreter/CMakeLists.txt
+index c2af587..666791a 100644
+--- a/Source/Tools/FEXInterpreter/CMakeLists.txt
++++ b/Source/Tools/FEXInterpreter/CMakeLists.txt
+@@ -27,6 +27,21 @@ target_compile_options(FEX PRIVATE ${FEX_TUNE_COMPILE_FLAGS})
+ 
+ LinkerGC(FEX)
+ 
++# Inversa: the same interpreter as a shared object, entered at inversa_fex_main
++if (CMAKE_CXX_FLAGS MATCHES "FEX_INVERSA")
++  add_library(FEXInversa SHARED
++    FEXInterpreter.cpp
++    AOT/AOTGenerator.cpp)
++  target_compile_definitions(FEXInversa PRIVATE ${DEFINES})
++  set_target_properties(FEXInversa PROPERTIES
++    C_VISIBILITY_PRESET hidden
++    CXX_VISIBILITY_PRESET hidden
++    VISIBILITY_INLINES_HIDDEN TRUE)
++  target_include_directories(FEXInversa PRIVATE ${CMAKE_BINARY_DIR}/generated)
++  target_link_libraries(FEXInversa PRIVATE ${LIBS})
++  target_compile_options(FEXInversa PRIVATE ${FEX_TUNE_COMPILE_FLAGS})
++endif()
++
+ install(TARGETS FEX RUNTIME
+     DESTINATION bin
+     COMPONENT Runtime)
+diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+index 52bdba1..10dbf93 100644
+--- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
++++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+@@ -383,7 +383,13 @@ static int StealFEXFDFromEnv(const char* Env) {
+   return FEXFD;
+ }
+ 
++#ifdef FEX_INVERSA
++// Inversa loads FEX as a shared object (its TLS then goes through TLSDESC, which the loader
++// serves; an executable's local-exec TLS would land in Darwin's own TSD slots) and calls this
++extern "C" __attribute__((visibility("default"))) int inversa_fex_main(int argc, char** argv, char** const envp) {
++#else
+ int main(int argc, char** argv, char** const envp) {
++#endif
+   auto SBRKPointer = FEX::SBRKAllocations::DisableSBRKAllocations();
+   FEXCore::Allocator::GLIBCScopedFault GLIBFaultScope;
+ 
+@@ -440,10 +446,13 @@ int main(int argc, char** argv, char** const envp) {
+ 
+   // Ensure FEXServer is setup before config options try to pull CONFIG_ROOTFS
+   auto SelfPath = FEX::GetSelfPath();
++#ifndef FEX_INVERSA
++  // (Inversa: no FEXServer. Its rootfs is a plain directory, and logs go to stderr)
+   if (!FEXServerClient::SetupClient(SelfPath.value_or(argv[0]))) {
+     LogMan::Msg::EFmt("FEXServerClient: Failure to setup client");
+     return -1;
+   }
++#endif
+ 
+   FEX_CONFIG_OPT(LDPath, ROOTFS);
+   FEX_CONFIG_OPT(Environment, ENV);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+index a7a432b..013de58 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+@@ -899,12 +899,25 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+   const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
+   const auto Is64Bit = Is64BitMode();
+ 
++#ifdef FEX_INVERSA
++  // INVERSA_GSTRACE=1: the guest's syscalls as it makes them
++  static const bool GStrace = getenv("INVERSA_GSTRACE") != nullptr;
++  if (GStrace) {
++    fprintf(stderr, "[guest] %lu(%#lx, %#lx, %#lx) ...\n", (unsigned long)GetArg(Is64Bit, Frame, 0), (unsigned long)GetArg(Is64Bit, Frame, 1),
++            (unsigned long)GetArg(Is64Bit, Frame, 2), (unsigned long)GetArg(Is64Bit, Frame, 3));
++  }
++#endif
+   // TODO: At some point these will be runtime selectable based on `syscall` versus `int 0x80` entrypoint.
+   if (Is64Bit) {
+     HandleSyscallImpl<true>(Frame, JITPC);
+   } else {
+     HandleSyscallImpl<false>(Frame, JITPC);
+   }
++#ifdef FEX_INVERSA
++  if (GStrace) {
++    fprintf(stderr, "[guest]   = %ld\n", (long)Frame->State.gregs[FEXCore::X86State::REG_RAX]);
++  }
++#endif
+ 
+   // Skip past the `syscall` or `int 0x80` instruction. Both of which are 2-bytes.
+   auto Thread = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
+index 11ff163..c86059f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
+@@ -14,7 +14,9 @@ $end_info$
+ #include <sys/epoll.h>
+ 
+ namespace FEX::HLE {
+-#ifdef ARCHITECTURE_arm64
++// Inversa: no raw svc, Darwin would read it as its own syscall; glibc's syscall() is
++// served by Inversa's Linux syscall layer
++#if defined(ARCHITECTURE_arm64) && !defined(FEX_INVERSA)
+ template<int syscall_num>
+ requires (syscall_num != -1)
+ uint64_t SyscallPassthrough0(FEXCore::Core::CpuStateFrame* Frame) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
+index 8b9c259..2b9ed9c 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
+@@ -124,7 +124,9 @@ void StackTracker::DeallocateStackObjectAndExit(void* Ptr, int Status) {
+     *ReadyToBeReaped = true;
+   }
+ 
+-#ifdef ARCHITECTURE_arm64
++#if defined(FEX_INVERSA)
++  ::syscall(SYSCALL_DEF(exit), Status);
++#elif defined(ARCHITECTURE_arm64)
+   __asm volatile("mov x8, %[SyscallNum];"
+                  "mov w0, %w[Result];"
+                  "svc #0;" ::[SyscallNum] "i"(SYSCALL_DEF(exit)),

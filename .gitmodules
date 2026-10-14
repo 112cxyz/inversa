@@ -1,0 +1,6 @@
+[submodule "third_party/FEX"]
+	path = third_party/FEX
+	url = https://github.com/FEX-Emu/FEX.git
+[submodule "third_party/Klepton"]
+	path = third_party/Klepton
+	url = https://github.com/shinyquagsire23/Klepton.git

@@ -1,0 +1,574 @@
+diff --git a/runtime/gfx/kl_vulkan.c b/runtime/gfx/kl_vulkan.c
+index 73854cc..7f7d4cb 100644
+--- a/runtime/gfx/kl_vulkan.c
++++ b/runtime/gfx/kl_vulkan.c
+@@ -340,6 +340,23 @@ static klvk_device *dev_find(VkDevice d) {
+     for (int i = 0; i < g_ndev; i++) if (g_devs[i]->dev == d) return g_devs[i];
+     return NULL;
+ }
++// A destroyed device must leave the table: the Cmd* wrappers and capture paths
++// all take g_devs[0], and engines often create and drop a probe device first.
++// The record itself is kept (never freed) since a racing thread may hold it.
++static void VKAPI_CALL klvk_DestroyDevice(VkDevice dev, const void *alloc) {
++    void (*real)(VkDevice, const void *) = real_gdpa ?
++        (void (*)(VkDevice, const void *))real_gdpa(dev, "vkDestroyDevice") : NULL;
++    pthread_mutex_lock(&g_lock);
++    for (int i = 0; i < g_ndev; i++)
++        if (g_devs[i]->dev == dev) {
++            memmove(&g_devs[i], &g_devs[i + 1], (g_ndev - i - 1) * sizeof *g_devs);
++            g_ndev--;
++            break;
++        }
++    pthread_mutex_unlock(&g_lock);
++    VKI("vkDestroyDevice %p, %d device(s) left\n", (void *)dev, g_ndev);
++    if (real) real(dev, alloc);
++}
+ static klvk_device *dev_of_queue(VkQueue q) {
+     // Queues are opaque; the guest may use one we never fetched. With a single
+     // device — which is every case here — the answer is unambiguous.
+@@ -443,7 +460,7 @@ static VkResult klvk_EnumerateInstanceExtensionProperties(
+ 
+     uint32_t n = 0;
+     real(layer, &n, NULL);
+-    VkExtensionProperties *tmp = calloc(n + 2, sizeof *tmp);
++    VkExtensionProperties *tmp = calloc(n + 5, sizeof *tmp);
+     if (!tmp) return VK_ERROR_OUT_OF_HOST_MEMORY;
+     real(layer, &n, tmp);
+ 
+@@ -457,6 +474,16 @@ static VkResult klvk_EnumerateInstanceExtensionProperties(
+         n++;
+     }
+ 
++    // Linux guests (Source 2) won't use Vulkan without a Linux WSI surface extension even
++    // when they render offscreen for VR. Advertised only; vkCreateInstance drops them.
++    static const char *const linux_wsi[] = { "VK_KHR_xcb_surface", "VK_KHR_xlib_surface", "VK_KHR_wayland_surface" };
++    for (unsigned i = 0; !layer && i < 3; i++)
++        if (!ext_supported(tmp, n, linux_wsi[i])) {
++            snprintf(tmp[n].extensionName, sizeof tmp[n].extensionName, "%s", linux_wsi[i]);
++            tmp[n].specVersion = 6;
++            n++;
++        }
++
+     VkResult r = VK_SUCCESS;
+     if (!props) *count = n;
+     else {
+@@ -494,6 +521,10 @@ static VkResult klvk_CreateInstance(const VkInstanceCreateInfo *ci,
+         }
+         if (have && !ext_supported(have, nhave, e)) {
+             VKI("instance ext %s NOT supported by MoltenVK — dropped\n", e);
++            // a Linux window-system surface stands in for the Metal one we can provide
++            if ((!strcmp(e, "VK_KHR_xcb_surface") || !strcmp(e, "VK_KHR_xlib_surface") ||
++                 !strcmp(e, "VK_KHR_wayland_surface")) && ext_supported(have, nhave, "VK_EXT_metal_surface"))
++                ext_add(&keep, "VK_EXT_metal_surface");
+             continue;
+         }
+         ext_add(&keep, e);
+@@ -571,6 +602,100 @@ static void dev_resolve(klvk_device *d) {
+ #undef R
+ }
+ 
++// ---- device feature clamp --------------------------------------------------------------
++// Desktop-Linux and mobile guests ask for features MoltenVK doesn't have (Source 2 wants
++// all of VK_EXT_extended_dynamic_state3), and vkCreateDevice then fails outright with
++// VK_ERROR_FEATURE_NOT_PRESENT. Every *Features struct is sType, pNext, then VkBool32s, so
++// each requested struct can be ANDed with what the device reports for the same struct.
++static size_t feature_struct_size(VkStructureType t) {
++    switch (t) {
++#define F(type, st) case st: return sizeof(type);
++    F(VkPhysicalDeviceFeatures2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
++    F(VkPhysicalDeviceVulkan11Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES)
++    F(VkPhysicalDeviceVulkan12Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
++    F(VkPhysicalDeviceVulkan13Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
++#ifdef VK_VERSION_1_4
++    F(VkPhysicalDeviceVulkan14Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)
++#endif
++    F(VkPhysicalDeviceExtendedDynamicStateFeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT)
++    F(VkPhysicalDeviceExtendedDynamicState2FeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT)
++    F(VkPhysicalDeviceExtendedDynamicState3FeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT)
++    F(VkPhysicalDeviceFragmentDensityMapFeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT)
++    F(VkPhysicalDeviceDynamicRenderingFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES)
++    F(VkPhysicalDeviceMultiviewFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES)
++    F(VkPhysicalDeviceShaderFloat16Int8Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES)
++    F(VkPhysicalDeviceMemoryPriorityFeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT)
++    F(VkPhysicalDeviceSynchronization2Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES)
++    F(VkPhysicalDeviceTimelineSemaphoreFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)
++    F(VkPhysicalDeviceDescriptorIndexingFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES)
++    F(VkPhysicalDeviceBufferDeviceAddressFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)
++    F(VkPhysicalDeviceImagelessFramebufferFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES)
++    F(VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES)
++    F(VkPhysicalDeviceHostQueryResetFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES)
++    F(VkPhysicalDevice16BitStorageFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES)
++    F(VkPhysicalDevice8BitStorageFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES)
++    F(VkPhysicalDeviceScalarBlockLayoutFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES)
++    F(VkPhysicalDeviceSamplerYcbcrConversionFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES)
++    F(VkPhysicalDeviceShaderDrawParametersFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES)
++    F(VkPhysicalDeviceVulkanMemoryModelFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES)
++    F(VkPhysicalDeviceUniformBufferStandardLayoutFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES)
++    F(VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES)
++    F(VkPhysicalDeviceRobustness2FeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT)
++    F(VkPhysicalDeviceCustomBorderColorFeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT)
++    F(VkPhysicalDeviceMaintenance4Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES)
++#if defined(VK_EXT_fragment_density_map_offset)
++    F(VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_FEATURES_EXT)
++#endif
++#if defined(VK_EXT_host_image_copy)
++    F(VkPhysicalDeviceHostImageCopyFeaturesEXT, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT)
++#endif
++#if defined(VK_KHR_dynamic_rendering_local_read)
++    F(VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR)
++#endif
++#undef F
++    default: return 0;
++    }
++}
++
++static void and_bools(VkBool32 *want, const VkBool32 *have, size_t n, const char *what) {
++    for (size_t i = 0; i < n; i++)
++        if (want[i] && !have[i]) {
++            VKI("device feature %s[%zu] not supported by MoltenVK — cleared\n", what, i);
++            want[i] = VK_FALSE;
++        }
++}
++
++static void clamp_device_features(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci) {
++    PFN_vkGetPhysicalDeviceFeatures2 gpf2 =
++        (PFN_vkGetPhysicalDeviceFeatures2)real_gipa(g_instance, "vkGetPhysicalDeviceFeatures2");
++    PFN_vkGetPhysicalDeviceFeatures gpf =
++        (PFN_vkGetPhysicalDeviceFeatures)real_gipa(g_instance, "vkGetPhysicalDeviceFeatures");
++    if (ci->pEnabledFeatures && gpf) {
++        VkPhysicalDeviceFeatures have;
++        gpf(phys, &have);
++        and_bools((VkBool32 *)ci->pEnabledFeatures, (const VkBool32 *)&have,
++                  sizeof have / sizeof(VkBool32), "core");
++    }
++    if (!gpf2) return;
++    for (VkBaseOutStructure *p = (VkBaseOutStructure *)ci->pNext; p; p = p->pNext) {
++        size_t sz = feature_struct_size(p->sType);
++        if (!sz) continue;
++        uint8_t scratch[512] __attribute__((aligned(16)));
++        if (sz > sizeof scratch) continue;
++        memset(scratch, 0, sizeof scratch);
++        ((VkBaseOutStructure *)scratch)->sType = p->sType;
++        if (p->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2) {
++            gpf2(phys, (VkPhysicalDeviceFeatures2 *)scratch);
++        } else {
++            VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = scratch };
++            gpf2(phys, &f2);
++        }
++        char what[32];
++        snprintf(what, sizeof what, "sType %d", (int)p->sType);
++        and_bools((VkBool32 *)((uint8_t *)p + 16), (const VkBool32 *)(scratch + 16), (sz - 16) / sizeof(VkBool32), what);
++    }
++}
++
+ static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci,
+                                   const VkAllocationCallbacks *alloc, VkDevice *out) {
+     PFN_vkCreateDevice real = (PFN_vkCreateDevice)real_gipa(g_instance, "vkCreateDevice");
+@@ -621,6 +746,7 @@ static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInf
+     mine.enabledLayerCount = 0;
+     mine.ppEnabledLayerNames = NULL;
+ 
++    clamp_device_features(phys, &mine);
+     VkResult r = real(phys, &mine, alloc, out);
+     free(have);
+     if (r != VK_SUCCESS) { VKI("vkCreateDevice FAILED %d\n", r); return r; }
+@@ -5893,7 +6019,7 @@ static const entry g_ours[] = {
+ #define E(n) { "vk" #n, (PFN_vkVoidFunction)klvk_##n }
+     E(CreateInstance), E(EnumerateInstanceExtensionProperties),
+     E(EnumeratePhysicalDevices),
+-    E(CreateDevice),
++    E(CreateDevice), E(DestroyDevice),
+     E(CreateAndroidSurfaceKHR), E(DestroySurfaceKHR),
+     E(GetPhysicalDeviceSurfaceSupportKHR), E(GetPhysicalDeviceSurfaceCapabilitiesKHR),
+     E(GetPhysicalDeviceSurfaceFormatsKHR), E(GetPhysicalDeviceSurfacePresentModesKHR),
+@@ -5997,6 +6123,7 @@ static PFN_vkVoidFunction VKAPI_CALL klvk_GetInstanceProcAddr(VkInstance inst,
+                                                               const char *name) {
+     vk_init();
+     if (!name) return NULL;
++    VKT("gipa(%p, \"%s\")\n", (void *)inst, name);
+     if (!strcmp(name, "vkGetInstanceProcAddr"))
+         return (PFN_vkVoidFunction)klvk_GetInstanceProcAddr;
+     if (!strcmp(name, "vkGetDeviceProcAddr"))
+@@ -6052,6 +6179,7 @@ int kl_vulkan_is_handle(const void *h) { return h == KLVK_HANDLE; }
+ void *kl_vulkan_sym(const char *name) {
+     vk_init();
+     if (!name || !g_avail) return NULL;
++    VKT("dlsym(vulkan, \"%s\")\n", name);
+     if (!strcmp(name, "vkGetInstanceProcAddr")) return (void *)klvk_GetInstanceProcAddr;
+     if (!strcmp(name, "vkGetDeviceProcAddr")) return (void *)klvk_GetDeviceProcAddr;
+     PFN_vkVoidFunction m = ours(name);
+diff --git a/runtime/kl_dl.c b/runtime/kl_dl.c
+index eb300fb..dbf6128 100644
+--- a/runtime/kl_dl.c
++++ b/runtime/kl_dl.c
+@@ -3,6 +3,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <limits.h>
+ #include <pthread.h>
+ #include <unistd.h>
+ #include "klepton.h"
+@@ -20,7 +21,7 @@
+ #include "kl_aaudio.h"
+ #include "kl_openxr.h"
+ 
+-#define KL_MAX_IMAGES 64
++#define KL_MAX_IMAGES 1024
+ typedef struct { char soname[128]; kl_image *img; } entry;
+ static entry  g_imgs[KL_MAX_IMAGES];
+ static int    g_nimgs = 0;
+@@ -85,6 +86,20 @@ int kl_dl_iterate_phdr(int (*cb)(void *, size_t, void *), void *data) {
+ }
+ 
+ // Register an image so guest dlsym/dladdr can see it (also used for the root libs).
++void kl_each_image(void (*cb)(const char *name, void *base, size_t span, void *ctx), void *ctx) {
++    for (int i = 0; i < g_nimgs; i++)
++        cb(g_imgs[i].soname, kl_base(g_imgs[i].img), kl_span(g_imgs[i].img), ctx);
++}
++
++int kl_find_tls_symbol(const char *name, void **module, uint64_t *off) {
++    int found = 0;
++    pthread_mutex_lock(&g_lock);
++    for (int i = 0; i < g_nimgs && !found; i++)
++        found = kl_image_tls_symbol(g_imgs[i].img, name, module, off);
++    pthread_mutex_unlock(&g_lock);
++    return found;
++}
++
+ void kl_register_image(const char *soname, kl_image *img) {
+     const char *base = basename_of(soname);
+     pthread_mutex_lock(&g_lock);
+@@ -348,9 +363,51 @@ static void kl_maybe_jni_onload(const char *path, kl_image *img) {
+             b, r);
+ }
+ 
++int (*kl_dep_hook)(const char *name, char *full, size_t cap);
++
++// Host modules: a guest dlopen of a path ending in `suffix` gets a handle whose dlsym
++// is answered by the host (the macOS steamclient for Linux's steamclient.so, say).
++static struct { const char *suffix; void *(*sym)(const char *); } g_host_mods[8];
++static int g_nhost_mods;
++
++void kl_dl_add_host_module(const char *suffix, void *(*sym)(const char *)) {
++    if (g_nhost_mods < 8) { g_host_mods[g_nhost_mods].suffix = suffix; g_host_mods[g_nhost_mods].sym = sym; g_nhost_mods++; }
++}
++
++static int host_module_for(const char *path) {
++    size_t n = strlen(path);
++    for (int i = 0; i < g_nhost_mods; i++) {
++        size_t m = strlen(g_host_mods[i].suffix);
++        if (n >= m && !strcmp(path + n - m, g_host_mods[i].suffix)) return i;
++    }
++    return -1;
++}
++#define HOST_MOD_HANDLE(i) ((void *)&g_host_mods[i])
++static kl_image *kl_load_recursive_inner(const char *path);
++
++// Libraries whose DT_NEEDED walk is under way: a cycle (freetype <-> harfbuzz) must
++// not recurse forever. Their symbols bind once they are loaded, so the inner edge
++// just reports success.
++static const char *g_loading[256];
++static int g_nloading;
++
+ kl_image *kl_load_recursive(const char *path) {
++    // One file, one image: libpango-1.0.so and libpango-1.0.so.0 are symlinks to the same
++    // library, and loading it twice registers every GObject type twice (glib refuses,
++    // returns type 0, and the next g_once on that type waits forever).
++    char real[PATH_MAX];
++    if (!getenv("KL_NO_REALPATH") && realpath(path, real)) path = real;
+     kl_image *have = kl_find_image(path);
+     if (have) return have;                       // cycle guard / already loaded
++    for (int i = 0; i < g_nloading; i++)
++        if (!strcmp(g_loading[i], path)) return (kl_image *)g_loading;   // in progress
++    if (g_nloading < 256) g_loading[g_nloading++] = path;
++    kl_image *r = kl_load_recursive_inner(path);
++    g_nloading--;
++    return r;
++}
++
++static kl_image *kl_load_recursive_inner(const char *path) {
+ 
+     char names[32][128];
+     int nn = kl_list_needed(path, names, 32);
+@@ -360,6 +417,21 @@ kl_image *kl_load_recursive(const char *path) {
+         fflush(stderr);
+     }
+     for (int i = 0; i < nn; i++) {
++        char full[1024];
++        int hooked = kl_dep_hook ? kl_dep_hook(names[i], full, sizeof full) : KL_DEP_DEFAULT;
++        if (hooked == KL_DEP_SERVED) {
++            if (kl_env_on("KL_TRACE_NEEDED", 1))
++                fprintf(stderr, "  [dl]     %s -> host-served (skip)\n", names[i]);
++            continue;
++        }
++        if (hooked == KL_DEP_PATH) {
++            if (!kl_load_recursive(full)) {
++                fprintf(stderr, "  [klepton] dependency %s of %s failed to load: %s\n",
++                        names[i], path, kl_error());
++                return NULL;
++            }
++            continue;
++        }
+         // The OpenXR loader ships as a real file, and some guests
+         // pull it in through DT_NEEDED rather than dlopen. Loading it would run
+         // the real Khronos loader, which then hunts for an Android runtime
+@@ -387,7 +459,6 @@ kl_image *kl_load_recursive(const char *path) {
+                 fprintf(stderr, "  [dl]     %s -> shim-served (skip)\n", names[i]);
+             continue;
+         }
+-        char full[1024];
+         if (strchr(names[i], '/')) snprintf(full, sizeof full, "%s", names[i]);
+         else snprintf(full, sizeof full, "%s/%s", g_libdir, names[i]);
+         // Framework-aware, NOT a raw access() on "<dir>/libfoo.so": on device the
+@@ -416,7 +487,7 @@ kl_image *kl_load_recursive(const char *path) {
+     kl_image *img = kl_load_auto(path);
+     if (!img) return NULL;
+     kl_register_image(path, img);
+-    kl_run_init(img);
++    if (!kl_env_on("KL_NO_INIT", 0)) kl_run_init(img);   // KL_NO_INIT=1: load and bind only (census)
+     kl_maybe_jni_onload(path, img);
+     return img;
+ }
+@@ -751,6 +822,21 @@ void *klb_dlopen(const char *path, int flags) {
+         fprintf(stderr, "  [klepton] guest dlopen(\"%s\") -> shim-served handle\n", path);
+         return (void *)&g_core_shim_handle;
+     }
++    int hm = host_module_for(path);
++    if (hm >= 0) {
++        fprintf(stderr, "  [klepton] guest dlopen(\"%s\") -> host module\n", path);
++        return HOST_MOD_HANDLE(hm);
++    }
++    char hooked_path[1024];
++    if (kl_dep_hook) {
++        const char *base = strrchr(path, '/'); base = base ? base + 1 : path;
++        int h = kl_dep_hook(base, hooked_path, sizeof hooked_path);
++        if (h == KL_DEP_SERVED) {
++            fprintf(stderr, "  [klepton] guest dlopen(\"%s\") -> host-served handle\n", path);
++            return (void *)&g_core_shim_handle;
++        }
++        if (h == KL_DEP_PATH && !strchr(path, '/')) path = hooked_path;
++    }
+     pthread_mutex_lock(&g_lock);
+     kl_image *found = kl_find_image(path);           // already loaded? refcount is coarse
+     pthread_mutex_unlock(&g_lock);
+@@ -835,6 +921,11 @@ static void *klb_dlsym_null(const char *name) {
+ }
+ 
+ void *klb_dlsym(void *handle, const char *name) {
++    for (int i = 0; i < g_nhost_mods; i++)
++        if (handle == HOST_MOD_HANDLE(i)) {
++            void *p = g_host_mods[i].sym(name);
++            return p ? p : klb_dlsym_null(name);
++        }
+     if (kl_egl_is_handle(handle)) return kl_egl_sym(name);
+     if (kl_opensl_is_handle(handle)) return kl_opensl_sym(name);
+     if (kl_ovrp_is_handle(handle)) return kl_ovrp_sym(name);
+@@ -878,6 +969,11 @@ void *klb_dlsym(void *handle, const char *name) {
+         return NULL;
+     }
+     void *v = kl_sym((kl_image *)handle, name);
++    // glibc's dlsym(handle) also searches the library's dependencies; pango's handle is
++    // how Source 2 reaches FreeType, fontconfig and glib. Ours are loaded globally, so a
++    // miss in the image falls back to the loaded set (and the shim, for system libs).
++    if (!v) v = kl_guest_sym_global(name);
++    if (!v) v = kl_shim_lookup(name);
+     if (!v) { snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
+               return klb_dlsym_null(name); }
+     { void *w = kl_dl_interpose(name, v); if (w) return w; }
+diff --git a/runtime/kl_image.c b/runtime/kl_image.c
+index 8d1801d..7da02a1 100644
+--- a/runtime/kl_image.c
++++ b/runtime/kl_image.c
+@@ -87,6 +87,11 @@ typedef struct { uint32_t sh_name, sh_type; uint64_t sh_flags, sh_addr, sh_offse
+ #define R_AARCH64_GLOB_DAT  1025
+ #define R_AARCH64_JUMP_SLOT 1026
+ #define R_AARCH64_RELATIVE  1027
++#define R_AARCH64_TLS_DTPMOD64 1028
++#define R_AARCH64_TLS_DTPREL64 1029
++#define R_AARCH64_TLS_TPREL64  1030
++#define R_AARCH64_TLSDESC      1031
++#define PT_TLS 7
+ #define STB_WEAK 2
+ 
+ struct kl_image {
+@@ -114,8 +119,12 @@ struct kl_image {
+     unsigned    weak_n, weak_cap;
+     void       *dl_handle;     // set when the image arrived as a translated
+                                // Mach-O dylib; then dyld owns the mapping
++    void       *tls;           // kl_tls_hooks module for this image's PT_TLS, if any
++    void       *entry;         // e_entry, for executables
+ };
+ 
++kl_tls_hooks_t kl_tls_hooks;
++
+ static void record_missing(kl_image *img, const char *nm) {
+     if (!nm) return;
+     for (unsigned i = 0; i < img->missing_n; i++)
+@@ -442,6 +451,44 @@ static int apply_relocs(kl_image *img, const Elf64_Rela *r, size_t count) {
+             else img->stats.jump_slot++;
+             break;
+         }
++        case R_AARCH64_TLSDESC:
++        case R_AARCH64_TLS_TPREL64: {
++            // Only this image's own TLS: a local reference (symbol 0, offset in the
++            // addend) or a TLS symbol it defines. Cross-module TLS isn't needed yet.
++            uint64_t off = (uint64_t)r->r_addend;
++            if (sidx) {
++                const Elf64_Sym *s = &img->symtab[sidx];
++                nm = img->strtab + s->st_name;
++                if (s->st_shndx == 0) {
++                    // defined by an already-loaded library (libstdc++'s __once_callable, say)
++                    void *mod; uint64_t symoff;
++                    if (!kl_find_tls_symbol(nm, &mod, &symoff)) {
++                        err("TLS import %s at %#llx: no loaded library defines it", nm,
++                            (unsigned long long)r->r_offset);
++                        return -1;
++                    }
++                    if (type == R_AARCH64_TLSDESC) kl_tls_hooks.desc(mod, off + symoff, slot);
++                    else if (kl_tls_hooks.tprel(mod, off + symoff, slot) != 0) {
++                        err("TPREL64 %s at %#llx: no fixed TLS room", nm, (unsigned long long)r->r_offset);
++                        return -1;
++                    }
++                    break;
++                }
++                off += s->st_value;
++            }
++            if (!img->tls) {
++                err("TLS relocation at %#llx but no PT_TLS (or no kl_tls_hooks)",
++                    (unsigned long long)r->r_offset);
++                return -1;
++            }
++            if (type == R_AARCH64_TLSDESC) {
++                kl_tls_hooks.desc(img->tls, off, slot);
++            } else if (kl_tls_hooks.tprel(img->tls, off, slot) != 0) {
++                err("TPREL64 at %#llx: no fixed TLS room", (unsigned long long)r->r_offset);
++                return -1;
++            }
++            break;
++        }
+         default:
+             err("unhandled relocation type %u at %#llx", type, (unsigned long long)r->r_offset);
+             return -1;
+@@ -450,6 +497,11 @@ static int apply_relocs(kl_image *img, const Elf64_Rela *r, size_t count) {
+     return 0;
+ }
+ 
++static int has_reloc_type(const Elf64_Rela *r, size_t count, uint32_t type) {
++    for (size_t i = 0; i < count; i++) if (ELF64_R_TYPE(r[i].r_info) == type) return 1;
++    return 0;
++}
++
+ // RELR: a bitmap-packed table of nothing but R_AARCH64_RELATIVE relocations. An
+ // even entry is an address to relocate and seeds `where` for the bitmaps after
+ // it; an odd entry is a bitmap whose set bits (from bit 1) relocate the 63 words
+@@ -564,6 +616,16 @@ static int bind_dynamic(kl_image *img, const Elf64_Phdr *ph, int phnum, uint64_t
+     }
+     if (!img->symtab || !img->strtab) { err("missing DT_SYMTAB/DT_STRTAB"); return -1; }
+ 
++    for (int i = 0; i < phnum; i++) {
++        if (ph[i].p_type != PT_TLS) continue;
++        if (!kl_tls_hooks.register_module) { err("%s has PT_TLS but no TLS runtime", img->path); return -1; }
++        int fixed = (rela && has_reloc_type(rela, relasz / sizeof(Elf64_Rela), R_AARCH64_TLS_TPREL64)) ||
++                    (jmprel && has_reloc_type(jmprel, pltsz / sizeof(Elf64_Rela), R_AARCH64_TLS_TPREL64));
++        img->tls = kl_tls_hooks.register_module(img->path, img->base + ph[i].p_vaddr - lo,
++                                                ph[i].p_filesz, ph[i].p_memsz, ph[i].p_align, fixed);
++        if (!img->tls) { err("%s: TLS registration failed", img->path); return -1; }
++    }
++
+     // Order is independent — RELA, RELR and APS2 relocate disjoint slots — but
+     // every relative table must run before kl_run_init: the .init_array pointers
+     // live in RELR/APS2 on a modern NDK and are raw offsets until relocated.
+@@ -572,6 +634,7 @@ static int bind_dynamic(kl_image *img, const Elf64_Phdr *ph, int phnum, uint64_t
+         return -1;
+     if (relr) apply_relr(img, relr, relrsz / sizeof(uint64_t));
+     if (arela && apply_android_packed(img, arela, arelasz) != 0) return -1;
++    if (img->tls && kl_tls_hooks.relocated) kl_tls_hooks.relocated(img->tls);
+     return 0;
+ }
+ 
+@@ -1051,6 +1114,7 @@ kl_image *kl_load(const char *path) {
+     if (map == MAP_FAILED) { err("mmap image: %s", strerror(errno));
+                              free(img); munmap(file, sb.st_size); return NULL; }
+     img->base = map + img->map_off;
++    if (eh->e_entry) img->entry = img->base + (eh->e_entry - lo);
+     if (img->map_off)
+         fprintf(stderr, "  [klepton] %s: placed %#zx into its mapping so a host "
+                         "page boundary falls between the executable bytes and "
+@@ -1201,6 +1265,25 @@ void kl_run_init(kl_image *img) {
+         if (img->init_array[i]) img->init_array[i]();
+ }
+ 
++void *kl_image_entry(kl_image *img) { return img->entry; }
++
++// A TLS symbol this image defines: its kl_tls_hooks module and offset in the block.
++int kl_image_tls_symbol(kl_image *img, const char *name, void **module, uint64_t *off) {
++    if (!img->tls || !img->symtab) return 0;
++    size_t n = img->nsyms;
++    if (!n) n = ((const char *)img->strtab - (const char *)img->symtab) / sizeof(Elf64_Sym);
++    const char *hi_p = (const char *)img->base + img->span;
++    for (size_t i = 1; i < n; i++) {
++        const Elf64_Sym *s = &img->symtab[i];
++        if ((const char *)(s + 1) > hi_p) break;
++        if (s->st_shndx == 0 || (s->st_info & 0xf) != 6 /* STT_TLS */) continue;
++        if (strcmp(img->strtab + s->st_name, name)) continue;
++        *module = img->tls; *off = s->st_value;
++        return 1;
++    }
++    return 0;
++}
++
+ void *kl_sym(kl_image *img, const char *name) {
+     // Linear scan of .dynsym.
+     //
+diff --git a/runtime/klepton.h b/runtime/klepton.h
+index 23bbbcc..81676d6 100644
+--- a/runtime/klepton.h
++++ b/runtime/klepton.h
+@@ -12,6 +12,19 @@
+ 
+ typedef struct kl_image kl_image;
+ 
++// ELF TLS for glibc-built guests. Klepton parses PT_TLS and the TLS relocations;
++// the host supplies the runtime (per-thread blocks, the TLSDESC resolver). With no
++// hooks set, an image that needs TLS fails to load with a clear error.
++typedef struct {
++    void *(*register_module)(const char *path, const void *init, size_t filesz,
++                             size_t memsz, size_t align, int fixed);
++    void (*desc)(void *module, uint64_t off, uint64_t slot[2]);
++    int  (*tprel)(void *module, uint64_t off, uint64_t *tp_off);
++    // the image is relocated: its TLS init image is final (may be NULL)
++    void (*relocated)(void *module);
++} kl_tls_hooks_t;
++extern kl_tls_hooks_t kl_tls_hooks;
++
+ // Load and fully relocate an ELF .so. Returns NULL on error; kl_error() explains.
+ kl_image *kl_load(const char *path);
+ // Load a klepton-ld-translated Mach-O dylib instead. dyld maps the guest
+@@ -23,6 +36,14 @@ kl_image *kl_load_dylib(const char *path);
+ // translation exists, else the ELF. Lets the boot chain run mixed while some
+ // libraries are still untranslatable. Every guest-library load goes through it.
+ kl_image *kl_load_auto(const char *path);
++// e_entry of an executable image (NULL for a library).
++void *kl_image_entry(kl_image *img);
++// TLS symbols across images, for TLS relocations against another library's variable.
++int kl_image_tls_symbol(kl_image *img, const char *name, void **module, uint64_t *off);
++int kl_find_tls_symbol(const char *name, void **module, uint64_t *off);
++// Every registered guest image (for symbolising samples of a live process).
++void kl_dl_add_host_module(const char *suffix, void *(*sym)(const char *));
++void kl_each_image(void (*cb)(const char *name, void *base, size_t span, void *ctx), void *ctx);
+ 
+ // Could kl_load_auto load a guest library at `path`? Ask this — never
+ // stat(path) — whenever answering an existence question about a guest library on
+@@ -125,6 +146,11 @@ void      kl_register_image(const char *soname, kl_image *img);
+ kl_image *kl_find_image(const char *soname);
+ // Load an .so plus its DT_NEEDED chain, dependencies first (kl_dl.c).
+ kl_image *kl_load_recursive(const char *path);
++// Host override for DT_NEEDED resolution: return KL_DEP_SERVED when the host
++// answers the library's symbols itself, KL_DEP_PATH after writing the file to
++// load into `full`, or KL_DEP_DEFAULT for Klepton's own rules.
++enum { KL_DEP_DEFAULT, KL_DEP_SERVED, KL_DEP_PATH };
++extern int (*kl_dep_hook)(const char *name, char *full, size_t cap);
+ // Read a file's DT_NEEDED sonames without loading it (kl_image.c).
+ int       kl_list_needed(const char *path, char names[][128], int max);
+ // Search every registered guest image for an export (kl_dl.c); used by the
