@@ -18,6 +18,18 @@ static int nranges;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread int writing;     /* this thread's view of MAP_JIT memory */
 
+void mvr_jit_register( void *addr, size_t len )
+{
+    pthread_mutex_lock( &lock );
+    if (nranges < 1024)
+    {
+        ranges[nranges].start = (uintptr_t)addr;
+        ranges[nranges].end = (uintptr_t)addr + len;
+        nranges++;
+    }
+    pthread_mutex_unlock( &lock );
+}
+
 static int find( uintptr_t a, size_t len )
 {
     for (int i = 0; i < nranges; i++)

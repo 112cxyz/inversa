@@ -24,6 +24,8 @@ int mvr_jit_contains( void *addr );
 void mvr_jit_unmap( void *addr, size_t len );
 
 int inv_x86_mode;
+extern int inv_arm64_mode;
+void *inv_map_code( void *addr, size_t len, int fixed, int fd, off_t off );
 
 enum { L_SHARED = 0x01, L_FIXED = 0x10, L_ANON = 0x20, L_NOREPLACE = 0x100000 };
 #define PAGE 0x1000ull
@@ -73,6 +75,8 @@ static void init(void)
 // the mapping itself, with the executable rules above
 static void *map( void *addr, size_t len, long prot, long flags, long fd, long off )
 {
+    if (inv_arm64_mode && fd >= 0 && (prot & PROT_EXEC))
+        return inv_map_code( addr, len, (flags & L_FIXED) != 0, (int)fd, (off_t)off );
     if (!(flags & L_ANON) || (inv_x86_mode && !(prot & PROT_EXEC)))
         return base_mmap( addr, len, (flags & L_ANON) ? prot : prot & ~PROT_EXEC, flags, fd, off );
     if (!(prot & PROT_EXEC)) return base_mmap( addr, len, prot, flags, fd, off );

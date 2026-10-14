@@ -26,6 +26,8 @@ make rootfs        # build/rootfs/x86_64 (bash, coreutils) and the arm64 librari
 
 `build/Inversa.app` is signed with a Developer ID and the cross-architecture entitlement when both are available (`SIGN_ID`, `PROFILE`). That gives the process 4K pages and memory below 4 GB, which Linux programs expect. Otherwise it's signed ad hoc.
 
+The experimental ARM64 loader that runs a program with its own Linux `ld.so` and glibc is enabled with `INVERSA_ARM64_LINUX=1`. It expects an ARM64 root at `build/rootfs/aarch64` or `INVERSA_ROOTFS`; the Klepton path remains the default.
+
 ## Layout
 
 | | |

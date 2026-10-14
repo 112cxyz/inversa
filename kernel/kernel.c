@@ -28,6 +28,9 @@
 
 void *mvr_glibc_lookup( const char *name );
 void *kl_shim_lookup( const char *name );
+extern int inv_arm64_mode;
+const char *inv_guest_path( const char *path, char *buf );
+long inv_arm64_brk( uintptr_t requested );
 
 // the guest libc as a guest sees it: the glibc layer's overrides, then Klepton's own table
 static void *libc_fn( const char *name )
@@ -384,7 +387,7 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     case 167: return sys_prctl( a, b, c, d, e );
     case 168: if (a) *(uint32_t *)a = 0; if (b) *(uint32_t *)b = 0; return 0;   // getcpu
     case 178: return inv_gettid();
-    case 214: return 0;                                            // brk: FEX keeps the guest's itself
+    case 214: return inv_arm64_mode ? inv_arm64_brk( (uintptr_t)a ) : 0;
     case 216: return sys_mremap( a, b, c, d, e );
     case 122: case 123: return nr == 123 ? sys_sched_getaffinity( a, b, c ) : 0;
     case 261: return sys_prlimit64( a, b, c, d );
@@ -423,6 +426,15 @@ long inv_syscall( long nr, long a, long b, long c, long d, long e, long f )
     static int checked;
     if (!checked && (checked = 1) && getenv( "INVERSA_STRACE" ) && !strcmp( getenv( "INVERSA_STRACE" ), "names" )) check_names();
     if (strace < 0) strace = getenv( "INVERSA_STRACE" ) && *getenv( "INVERSA_STRACE" ) != '0';
+    char rooted[4096];
+    if (inv_arm64_mode)
+    {
+        // Most path syscalls put the pathname after a directory fd.
+        if (nr == 56 || nr == 79 || nr == 78 || nr == 48 || nr == 437 || nr == 291 || nr == 35 || nr == 34)
+            b = (long)inv_guest_path( (const char *)b, rooted );
+        else if (nr == 49 || nr == 221)
+            a = (long)inv_guest_path( (const char *)a, rooted );
+    }
     long r = dispatch( nr, a, b, c, d, e, f );
     if (strace)
     {

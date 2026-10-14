@@ -7,6 +7,7 @@
 #include "glibc/glibc.h"
 #include "tls/mvr_tls.h"
 #include "klepton.h"
+#include <Security/Security.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <spawn.h>
@@ -19,6 +20,8 @@
 extern char **environ;
 extern void mvr_enter( void *entry, void *sp ) __attribute__((noreturn));
 void inv_cpu_feature_registers( char *out, size_t cap );
+int inv_linux_run( const char *path, int argc, char **argv, const char *guest_root );
+extern int inv_arm64_mode;
 void mvr_crash_init(void);
 
 enum { EM_AARCH64 = 183, EM_X86_64 = 62 };
@@ -77,6 +80,18 @@ static void vulkan_env(void)
     }
 }
 
+/* a 4K-page re-exec without the entitlement is killed by the kernel, so ask first */
+static int has_xarch_entitlement(void)
+{
+    SecTaskRef task = SecTaskCreateFromSelf( NULL );
+    if (!task) return 0;
+    CFTypeRef v = SecTaskCopyValueForEntitlement( task, CFSTR( "com.apple.developer.cross-architecture-support" ), NULL );
+    int on = v && CFGetTypeID( v ) == CFBooleanGetTypeID() && CFBooleanGetValue( (CFBooleanRef)v );
+    if (v) CFRelease( v );
+    CFRelease( task );
+    return on;
+}
+
 static int usage(void)
 {
     fprintf( stderr, "usage: inversa run <program> [args...]\n       inversa probe <program>\n" );
@@ -88,6 +103,8 @@ int main( int argc, char **argv )
     if (argc < 3) return usage();
     int probe = !strcmp( argv[1], "probe" );
     if (!probe && strcmp( argv[1], "run" )) return usage();
+    /* probing loads and resolves only: no constructors, so no guest code runs */
+    if (probe) setenv( "KL_NO_INIT", "1", 1 );
     const char *prog = argv[2];
     int machine = elf_machine( prog );
     if (machine != EM_AARCH64 && machine != EM_X86_64)
@@ -96,7 +113,9 @@ int main( int argc, char **argv )
         return 1;
     }
 
-    if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ))
+    if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ) && !has_xarch_entitlement())
+        fprintf( stderr, "inversa: not signed with the cross-architecture entitlement: 16K pages, no memory below 4 GB\n" );
+    else if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ))
     {
         /* Linux code expects 4K pages, and MAP_JIT at a fixed address needs them: re-exec
          * ourselves as a 4K-page process (needs the cross-architecture entitlement) */
@@ -143,6 +162,19 @@ int main( int argc, char **argv )
     mvr_deps_init( load );
     kl_thread_init();
     mvr_tls_thread_init();
+
+    if (machine == EM_AARCH64 && getenv( "INVERSA_ARM64_LINUX" ))
+    {
+        char guest_root[1300];
+        const char *configured = getenv( "INVERSA_ROOTFS" );
+        if (configured) snprintf( guest_root, sizeof guest_root, "%s", configured );
+        else snprintf( guest_root, sizeof guest_root, "%s/../rootfs/aarch64", dir );
+        inv_arm64_mode = 1;
+        if (!getenv( "INVERSA_NO_CRASH_HANDLER" )) mvr_crash_init();
+        if (inv_linux_run( prog, argc - 2, argv + 2, guest_root ))
+            fprintf( stderr, "inversa: ARM64 loader failed: %s\n", strerror( errno ) );
+        return 1;
+    }
 
     kl_image *img = kl_load_recursive( load );
     if (!img) { fprintf( stderr, "inversa: %s\n", kl_error() ); return 1; }

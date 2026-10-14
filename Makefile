@@ -14,10 +14,10 @@ INC     := -I$(KLEPTON)/runtime -I$(KLEPTON)/runtime/jni -I$(KLEPTON)/runtime/li
            -I$(KLEPTON) -I$(VK_INC) -Iloader
 CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations -arch arm64
 LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio -framework VideoToolbox -framework CoreMedia -framework CoreVideo \
-           -framework IOSurface -framework CoreFoundation -framework AVFoundation -framework Foundation
+           -framework IOSurface -framework Security -framework CoreFoundation -framework AVFoundation -framework Foundation
 LOADER  := $(addprefix loader/,crash.c deps.c steam.c jit.c glibc/glibc.c glibc/glibc_ext.c glibc/glibc_va.S \
            tls/mvr_tls.c tls/mvr_tls.S tls/mvr_enter.S)
-SRCS    := host/inversa.c host/cpu.c kernel/kernel.c kernel/libc.c kernel/memory.c kernel/files.c kernel/threads.c
+SRCS    := host/inversa.c host/cpu.c kernel/kernel.c kernel/libc.c kernel/memory.c kernel/files.c kernel/threads.c kernel/linux.c
 
 # Developer ID + the cross-architecture entitlement (memory below 4 GB, 4K pages) need its
 # provisioning profile; without them the bundle is signed ad hoc and runs with 16K pages
