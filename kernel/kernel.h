@@ -15,6 +15,7 @@ void inv_kernel_init(void);
 #include <stdint.h>
 long inv_fstatat(long dirfd, const char *path, void *buf, long flags);
 long inv_fstat(long fd, void *buf);
+long inv_execveat(long dirfd, const char *path, char *const *argv, char *const *envp, long flags);
 long inv_openat2(long dirfd, const char *path, const uint64_t *how, size_t size);
 extern int inv_x86_mode;                          // running x86-64 code through FEX
 #endif

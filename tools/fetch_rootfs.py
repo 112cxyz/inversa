@@ -73,3 +73,19 @@ for d in ("bin", "sbin", "lib", "lib64"):   # merged /usr
 for n in resolve(wanted):
     unpack(n); print(n, pkgs[n]["Version"])
 for d in ("etc", "tmp", "proc", "dev", "home", "root", "var/tmp"): os.makedirs(os.path.join(out, d), exist_ok=True)
+
+# Package extraction does not run Debian's account setup scripts. Give tools
+# such as ls a name for the host uid/gid that owns files in this root.
+uid, gid = os.getuid(), os.getgid()
+guest = os.environ.get("INVERSA_GUEST_USER", "user")
+if not re.fullmatch(r"[a-z_][a-z0-9_-]*", guest): raise SystemExit("invalid INVERSA_GUEST_USER")
+passwd = os.path.join(out, "etc", "passwd")
+group = os.path.join(out, "etc", "group")
+if not os.path.exists(passwd):
+    with open(passwd, "w") as f:
+        f.write("root:x:0:0:root:/root:/bin/sh\n")
+        if uid: f.write(f"{guest}:x:{uid}:{gid}:Guest:/home/{guest}:/bin/sh\n")
+if not os.path.exists(group):
+    with open(group, "w") as f:
+        f.write("root:x:0:\n")
+        if gid: f.write(f"{guest}:x:{gid}:\n")

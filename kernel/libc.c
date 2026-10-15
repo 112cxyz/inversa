@@ -23,6 +23,17 @@ static long g_statx( long dirfd, const char *path, long flags, long mask, void *
 {
     return inv_syscall( 291, dirfd, (long)path, flags, mask, (long)buf, 0 );
 }
+// Klepton's dup2 refuses stdout/stderr as targets (an Android-app guard); a Linux program
+// redirecting into a pipe needs exactly that
+static long g_dup2( long from, long to ) { return dup2( (int)from, (int)to ); }
+static long g_dup3( long from, long to, long flags )
+{
+    if (from == to || (flags & ~0x80000L)) { errno = EINVAL; return -1; }
+    int r = dup2( (int)from, (int)to );
+    if (r >= 0 && (flags & 0x80000)) fcntl( r, F_SETFD, FD_CLOEXEC );
+    return r;
+}
+static long g_execve( const char *path, char *const *argv, char *const *envp ) { return inv_execveat( -100, path, argv, envp, 0 ); }
 static long g_uname( void *buf ) { return inv_syscall( 160, (long)buf, 0, 0, 0, 0, 0 ); }
 static long g_sigaltstack( const void *ss, void *old ) { return inv_syscall( 132, (long)ss, (long)old, 0, 0, 0, 0 ); }
 static long g_getdents64( long fd, long buf, long n ) { return inv_syscall( 61, fd, buf, n, 0, 0, 0 ); }
@@ -60,6 +71,7 @@ long inv_mprotect( void *addr, size_t len, long prot );
 static const struct { const char *name; void *fn; } table[] = {
     { "syscall", inv_syscall }, { "mmap", inv_mmap }, { "mmap64", inv_mmap }, { "munmap", inv_munmap },
     { "mprotect", inv_mprotect },
+    { "dup2", g_dup2 }, { "dup3", g_dup3 }, { "execve", g_execve },
     { "uname", g_uname }, { "statx", g_statx },
     { "fstatat", inv_fstatat }, { "fstatat64", inv_fstatat }, { "fstat", inv_fstat }, { "fstat64", inv_fstat }, { "sigaltstack", g_sigaltstack }, { "getdents64", g_getdents64 }, { "tgkill", g_tgkill }, { "getcpu", g_getcpu },
     { "creat", g_creat }, { "creat64", g_creat }, { "shm_open", g_shm_open }, { "shm_unlink", shm_unlink },

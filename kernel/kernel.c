@@ -20,9 +20,11 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -31,6 +33,7 @@ void *kl_shim_lookup( const char *name );
 extern int inv_arm64_mode;
 const char *inv_guest_path( const char *path, char *buf );
 long inv_arm64_brk( uintptr_t requested );
+long inv_ioctl( long fd, long request, long arg );
 
 // the guest libc as a guest sees it: the glibc layer's overrides, then Klepton's own table
 static void *libc_fn( const char *name )
@@ -46,6 +49,63 @@ typedef long (*sysfn)( long, long, long, long, long, long );
 static int strace = -1;
 
 static long fail( int e ) { errno = e; return -1; }
+
+// FEX creates CLONE_THREAD workers through its ThreadManager. Its ForkGuest path
+// reaches this syscall with SIGCHLD, optionally CLONE_FS/CLONE_FILES, and no
+// guest stack: it needs a separate process with a copied address space.
+static long sys_clone_process( uint64_t flags, long stack, long parent_tid, long child_tid, long tls )
+{
+    enum { CLONE_FS = 0x200, CLONE_FILES = 0x400, CLONE_VFORK = 0x4000 };
+    if ((flags & 0xff) != 17 || (flags & ~(uint64_t)(CLONE_FS | CLONE_FILES | CLONE_VFORK | 0xff)) ||
+        stack || parent_tid || child_tid || tls)
+        return fail( ENOSYS );
+    return fork();
+}
+
+static long sys_clone3_process( const uint64_t *args, size_t size )
+{
+    if (!args || size < 88) return fail( EINVAL );
+    // clone3: flags, pidfd, child_tid, parent_tid, exit_signal, stack,
+    // stack_size, tls, set_tid, set_tid_size, cgroup.
+    if (args[1] || args[2] || args[3] || args[5] || args[6] || args[7] || args[8] || args[9] || args[10])
+        return fail( ENOSYS );
+    return sys_clone_process( args[0] | args[4], 0, 0, 0, 0 );
+}
+
+static int socket_flags( int fd, int flags )
+{
+    if ((flags & 0x80000) && fcntl( fd, F_SETFD, FD_CLOEXEC ) < 0) return -1;
+    if (flags & 0x800)
+    {
+        int old = fcntl( fd, F_GETFL );
+        if (old < 0 || fcntl( fd, F_SETFL, old | O_NONBLOCK ) < 0) return -1;
+    }
+    return 0;
+}
+
+static long sys_socket( long domain, long type, long protocol )
+{
+    if (type & ~(long)(0x80000 | 0x800 | 0xf)) return fail( EINVAL );
+    typedef int (*socket_fn)( int, int, int );
+    socket_fn fn = (socket_fn)libc_fn( "socket" );
+    if (!fn) return fail( ENOSYS );
+    int fd = fn( (int)domain, (int)type & 0xf, (int)protocol );
+    if (fd < 0) return -1;
+    if (socket_flags( fd, (int)type )) { int e = errno; close( fd ); return fail( e ); }
+    return fd;
+}
+
+static long sys_accept4( long fd, long addr, long addrlen, long flags )
+{
+    if (flags & ~(long)(0x80000 | 0x800)) return fail( EINVAL );
+    typedef int (*accept_fn)( int, void *, void * );
+    accept_fn fn = (accept_fn)libc_fn( "accept" );
+    if (!fn) return fail( ENOSYS );
+    int client = fn( (int)fd, (void *)addr, (void *)addrlen );
+    if (client < 0) return -1;
+    if (socket_flags( client, (int)flags )) { int e = errno; close( client ); return fail( e ); }
+    return client;
+}
 
 /* ---- forwarded by name ----------------------------------------------------- */
 // raw syscall -> the libc function with the same meaning and argument order
@@ -67,7 +127,7 @@ static const struct { const char *sys, *fn; } same[] = {
     { "getpeername", 0 }, { "wait4", 0 }, { "getrusage", 0 }, { "newfstatat", "fstatat" },
     { "fstat", 0 }, { "ppoll", 0 }, { "pselect6", "pselect" }, { "eventfd2", "eventfd" },
     { "utimensat", 0 }, { "fstatfs", 0 }, { "statfs", 0 }, { "fallocate", 0 }, { "flock", 0 },
-    { "getxattr", 0 }, { "lgetxattr", 0 }, { "fgetxattr", 0 }, { "listxattr", 0 }, { "execve", 0 },
+    { "getxattr", 0 }, { "lgetxattr", 0 }, { "fgetxattr", 0 }, { "listxattr", 0 },
     { "setuid", 0 }, { "setgid", 0 }, { "setreuid", 0 }, { "setregid", 0 }, { "getgroups", 0 },
     { "sched_getscheduler", 0 }, { "sched_getparam", 0 }, { "sched_setparam", 0 },
     { "getpriority", 0 }, { "setpriority", 0 }, { "times", 0 }, { "mincore", 0 },
@@ -101,33 +161,74 @@ static sysfn forwarded( long nr )
 
 /* ---- signals: Linux numbering and layouts --------------------------------- */
 // Linux signal n -> Darwin, 0 where Darwin has none (SIGSTKFLT, SIGPWR, real-time)
-static const int sig_to_darwin[32] = {
+static const int sig_to_darwin[65] = {
     0, SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1,
     SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, 0, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN,
     SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, 0, SIGSYS,
+    [63] = SIGINFO, // FEX's private thread-pause signal
 };
 
-int inv_sig_to_darwin( int s ) { return s > 0 && s < 32 ? sig_to_darwin[s] : 0; }
+int inv_sig_to_darwin( int s ) { return s > 0 && s <= 64 ? sig_to_darwin[s] : 0; }
 
 int inv_sig_to_linux( int s )
 {
-    for (int i = 1; i < 32; i++) if (sig_to_darwin[i] == s) return i;
+    for (int i = 1; i <= 64; i++) if (sig_to_darwin[i] && sig_to_darwin[i] == s) return i;
     return 0;
 }
 
 static void set_to_darwin( uint64_t in, sigset_t *out )
 {
     sigemptyset( out );
-    for (int i = 1; i < 32; i++)
+    for (int i = 1; i <= 64; i++)
         if ((in >> (i - 1)) & 1 && sig_to_darwin[i]) sigaddset( out, sig_to_darwin[i] );
 }
 
 static uint64_t set_to_linux( const sigset_t *in )
 {
     uint64_t out = 0;
-    for (int i = 1; i < 32; i++)
+    for (int i = 1; i <= 64; i++)
         if (sig_to_darwin[i] && sigismember( in, sig_to_darwin[i] )) out |= 1ull << (i - 1);
     return out;
+}
+
+static long sys_pselect6( long nfds, long readfds, long writefds, long exceptfds, long timeout, long sigarg )
+{
+    struct { const uint64_t *mask; size_t size; } *arg = (void *)sigarg;
+    sigset_t mask;
+    if (arg)
+    {
+        if (!arg->mask || arg->size != 8) return fail( EINVAL );
+        set_to_darwin( *arg->mask, &mask );
+    }
+    return pselect( (int)nfds, (fd_set *)readfds, (fd_set *)writefds,
+                    (fd_set *)exceptfds, (const struct timespec *)timeout, arg ? &mask : NULL );
+}
+
+static long sys_clock_nanosleep( long clock, long flags, long req, long rem )
+{
+    if (clock != 0 && clock != 1) return fail( EINVAL );
+    if (flags & ~1L) return fail( EINVAL );
+    const struct timespec *requested = (const struct timespec *)req;
+    if (!requested) return fail( EFAULT );
+    struct timespec delta = *requested;
+    if (flags & 1)
+    {
+        struct timespec now;
+        if (clock_gettime( clock == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now )) return -1;
+        delta.tv_sec -= now.tv_sec;
+        delta.tv_nsec -= now.tv_nsec;
+        if (delta.tv_nsec < 0) { delta.tv_nsec += 1000000000L; delta.tv_sec--; }
+        if (delta.tv_sec < 0) return 0;
+    }
+    return nanosleep( &delta, flags & 1 ? NULL : (struct timespec *)rem );
+}
+
+static long sys_linkat( long olddir, long oldpath, long newdir, long newpath, long flags )
+{
+    if (flags & ~0x400L) return fail( EINVAL );
+    return linkat( olddir == -100 ? AT_FDCWD : (int)olddir, (const char *)oldpath,
+                   newdir == -100 ? AT_FDCWD : (int)newdir, (const char *)newpath,
+                   flags & 0x400 ? AT_SYMLINK_FOLLOW : 0 );
 }
 
 // struct k_sigaction for arm64: handler, flags, restorer, mask
@@ -372,11 +473,18 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     switch (nr)
     {
     case 17: return getcwd( (char *)a, (size_t)b ) ? (long)strlen( (char *)a ) + 1 : -1;
+    case 29: return inv_ioctl( a, b, c );
+    case 223: return 0;                                            // fadvise64: advice only
+    case 221: return inv_execveat( -100, (const char *)a, (char *const *)b, (char *const *)c, 0 );
+    case 281: return inv_execveat( a, (const char *)b, (char *const *)c, (char *const *)d, e );
+    case 37: return sys_linkat( a, b, c, d, e );
     case 61: return sys_getdents64( a, b, c );
+    case 72: return sys_pselect6( a, b, c, d, e, f );
     case 93: inv_thread_exit( (int)a );
     case 94: _exit( (int)a );
     case 96: return inv_gettid();                                  // set_tid_address
     case 98: return sys_futex( a, b, c, d, e, f );
+    case 115: return sys_clock_nanosleep( a, b, c, d );
     case 99: case 293: case 283: return fail( ENOSYS );            // set_robust_list, rseq, membarrier
     case 129: return kill( (pid_t)a, inv_sig_to_darwin( (int)b ) );
     case 130: case 131: return inv_tkill( nr == 131 ? c : b, nr == 131 ? b : a );   // tkill, tgkill
@@ -387,8 +495,18 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     case 167: return sys_prctl( a, b, c, d, e );
     case 168: if (a) *(uint32_t *)a = 0; if (b) *(uint32_t *)b = 0; return 0;   // getcpu
     case 178: return inv_gettid();
+    case 198: return sys_socket( a, b, c );
     case 214: return inv_arm64_mode ? inv_arm64_brk( (uintptr_t)a ) : 0;
     case 216: return sys_mremap( a, b, c, d, e );
+    case 220: return sys_clone_process( (uint64_t)a, b, c, d, e );
+    case 242: return sys_accept4( a, b, c, d );
+    case 260: {
+        // Linux WCONTINUED is 8; Darwin's is 16. The wait status and rusage
+        // layouts otherwise match on ARM64.
+        if (c & ~11L) return fail( EINVAL );
+        int options = (int)(c & 3) | ((c & 8) ? WCONTINUED : 0);
+        return wait4( (pid_t)a, (int *)b, options, (struct rusage *)d );
+    }
     case 122: case 123: return nr == 123 ? sys_sched_getaffinity( a, b, c ) : 0;
     case 261: return sys_prlimit64( a, b, c, d );
     case 278: arc4random_buf( (void *)a, (size_t)b ); return b;    // getrandom
@@ -396,6 +514,7 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     case 79: return inv_fstatat( a, (const char *)b, (void *)c, d );
     case 80: return inv_fstat( a, (void *)b );
     case 437: return inv_openat2( a, (const char *)b, (const uint64_t *)c, (size_t)d );
+    case 435: return sys_clone3_process( (const uint64_t *)a, (size_t)b );
     }
     sysfn fn = nr >= 0 && (size_t)nr < NSYS ? forwarded( nr ) : NULL;
     if (fn)

@@ -13,6 +13,7 @@
 #include <locale.h>
 #include <langinfo.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,11 +21,13 @@
 #include <strings.h>
 #include <sys/mount.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/sem.h>
 #include <sys/resource.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/sysctl.h>
@@ -671,6 +674,96 @@ static void *g_dlmopen( long lmid, const char *file, int flags )
     return ((void *(*)( const char *, int ))klepton( "dlopen" ))( file, flags );
 }
 
+static char proc_dir[1024];
+static pthread_once_t proc_dir_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t proc_maps_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void init_proc_dir(void)
+{
+    char sample[1024];
+    const char *p = kl_guest_path( "/proc/cpuinfo", sample, sizeof sample );
+    if (p == sample && strlen( sample ) > strlen( "/cpuinfo" ))
+    {
+        snprintf( proc_dir, sizeof proc_dir, "%s", sample );
+        *strrchr( proc_dir, '/' ) = 0;
+        char fd[1100];
+        snprintf( fd, sizeof fd, "%s/self/fd", proc_dir );
+        symlink( "/dev/fd", fd );
+        char path[1100];
+        snprintf( path, sizeof path, "%s/self/exe", proc_dir );
+        symlink( exe_path, path );
+        snprintf( path, sizeof path, "%s/self/cmdline", proc_dir );
+        int file = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0444 );
+        if (file >= 0) { write( file, exe_path, strlen( exe_path ) + 1 ); close( file ); }
+    }
+}
+
+static void refresh_proc_maps(void)
+{
+    char path[1100];
+    snprintf( path, sizeof path, "%s/self/maps", proc_dir );
+    FILE *f = fopen( path, "w" );
+    if (!f) return;
+    mach_vm_address_t addr = 0;
+    while (1)
+    {
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region( mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
+                            (vm_region_info_t)&info, &n, &object ) != KERN_SUCCESS) break;
+        if (object != MACH_PORT_NULL) mach_port_deallocate( mach_task_self(), object );
+        fprintf( f, "%llx-%llx %c%c%cp 00000000 00:00 0\n",
+                 (unsigned long long)addr, (unsigned long long)(addr + size),
+                 info.protection & VM_PROT_READ ? 'r' : '-',
+                 info.protection & VM_PROT_WRITE ? 'w' : '-',
+                 info.protection & VM_PROT_EXECUTE ? 'x' : '-' );
+        if (!size || addr + size <= addr) break;
+        addr += size;
+    }
+    fclose( f );
+}
+
+static int g_open( const char *path, int flags, int mode )
+{
+    if (path && (!strcmp( path, "/proc" ) || !strcmp( path, "/proc/self/maps" )))
+    {
+        pthread_once( &proc_dir_once, init_proc_dir );
+        if (proc_dir[0])
+        {
+            if (!strcmp( path, "/proc/self/maps" ))
+            {
+                pthread_mutex_lock( &proc_maps_lock );
+                refresh_proc_maps();
+                pthread_mutex_unlock( &proc_maps_lock );
+            }
+            else path = proc_dir;
+        }
+    }
+    return ((int (*)(const char *, int, int))klepton( "open" ))( path, flags, mode );
+}
+
+// glibc's sigset_t is 128 bytes; Darwin's is 4. FEX needs the pselect symbol
+// even when its syscall path is used for guest pselect6.
+static int g_pselect( int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                      const struct timespec *timeout, const uint64_t *linux_mask )
+{
+    static const int signal_map[32] = {
+        0, SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1,
+        SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, 0, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN,
+        SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, 0, SIGSYS,
+    };
+    sigset_t mask;
+    if (linux_mask)
+    {
+        sigemptyset( &mask );
+        for (int i = 1; i < 32; i++)
+            if (signal_map[i] && (*linux_mask & (1ull << (i - 1)))) sigaddset( &mask, signal_map[i] );
+    }
+    return pselect( nfds, readfds, writefds, exceptfds, timeout, linux_mask ? &mask : NULL );
+}
+
 /* ---- the table -------------------------------------------------------------- */
 extern void mvrv_printf_chk(void), mvrv_fprintf_chk(void), mvrv_asprintf_chk(void), mvrv_syslog_chk(void),
             mvrv_warn(void), mvrv_errx(void);
@@ -679,10 +772,12 @@ static const struct { const char *name; void *fn; } table[] = {
     { "fcntl", g_fcntl }, { "fcntl64", g_fcntl },
     { "eventfd", g_eventfd }, { "eventfd_write", g_eventfd_write }, { "eventfd_read", g_eventfd_read },
     { "write", g_write }, { "read", g_read }, { "close", g_close },
+    { "open", g_open },
 
     { "semget", g_semget }, { "semctl", g_semctl }, { "semop", g_semop }, { "semtimedop", g_semtimedop },
     { "dlmopen", g_dlmopen }, { "mmap", g_mmap }, { "mmap64", g_mmap }, { "munmap", g_munmap }, { "mprotect", g_mprotect },
     { "readlink", g_readlink }, { "readlinkat", g_readlinkat },
+    { "pselect", g_pselect },
     { "sysconf", g_sysconf }, { "__sysconf", g_sysconf }, { "get_nprocs", g_get_nprocs },
     { "get_nprocs_conf", g_get_nprocs },
     { "getauxval", g___getauxval }, { "__getauxval", g___getauxval },
