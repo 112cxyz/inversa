@@ -30,6 +30,7 @@
 
 void *mvr_glibc_lookup( const char *name );
 void *kl_shim_lookup( const char *name );
+void kl_pthread_atfork_child( void );
 extern int inv_arm64_mode;
 const char *inv_guest_path( const char *path, char *buf );
 long inv_arm64_brk( uintptr_t requested );
@@ -59,7 +60,9 @@ static long sys_clone_process( uint64_t flags, long stack, long parent_tid, long
     if ((flags & 0xff) != 17 || (flags & ~(uint64_t)(CLONE_FS | CLONE_FILES | CLONE_VFORK | 0xff)) ||
         stack || parent_tid || child_tid || tls)
         return fail( ENOSYS );
-    return fork();
+    pid_t pid = fork();
+    if (pid == 0) kl_pthread_atfork_child();   // the child's thread can unlock what it held again
+    return pid;
 }
 
 static long sys_clone3_process( const uint64_t *args, size_t size )

@@ -34,6 +34,20 @@ static long g_dup3( long from, long to, long flags )
     return r;
 }
 static long g_execve( const char *path, char *const *argv, char *const *envp ) { return inv_execveat( -100, path, argv, envp, 0 ); }
+// INVERSA_LOCKDEBUG=1: name a caller spinning on a mutex it can't get (a lock whose holder
+// didn't survive fork, say)
+int klb_pthread_mutex_trylock( void *m );
+static long g_mutex_trylock( void *m )
+{
+    static __thread unsigned fails;
+    static __thread void *last;
+    long r = klb_pthread_mutex_trylock( m );
+    void *ra = __builtin_return_address( 0 );
+    if (!r || ra != last) { fails = 0; last = ra; return r; }
+    if (++fails == 2000)
+        fprintf( stderr, "inversa: pid %d spinning on mutex %p from %p\n", getpid(), m, ra );
+    return r;
+}
 static long g_uname( void *buf ) { return inv_syscall( 160, (long)buf, 0, 0, 0, 0, 0 ); }
 static long g_sigaltstack( const void *ss, void *old ) { return inv_syscall( 132, (long)ss, (long)old, 0, 0, 0, 0 ); }
 static long g_getdents64( long fd, long buf, long n ) { return inv_syscall( 61, fd, buf, n, 0, 0, 0 ); }
@@ -87,6 +101,9 @@ static const struct { const char *name; void *fn; } table[] = {
 
 void *inv_libc_lookup( const char *name )
 {
+    static int lockdebug = -1;
+    if (lockdebug < 0) lockdebug = getenv( "INVERSA_LOCKDEBUG" ) != NULL;
+    if (lockdebug && !strcmp( name, "pthread_mutex_trylock" )) return g_mutex_trylock;
     for (size_t i = 0; i < sizeof table / sizeof table[0]; i++)
         if (!strcmp( table[i].name, name )) return table[i].fn;
     return NULL;

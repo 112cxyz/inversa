@@ -522,7 +522,7 @@ index 8d1801d..7da02a1 100644
      // Linear scan of .dynsym.
      //
 diff --git a/runtime/klepton.h b/runtime/klepton.h
-index 23bbbcc..81676d6 100644
+index 23bbbcc..80ff03c 100644
 --- a/runtime/klepton.h
 +++ b/runtime/klepton.h
 @@ -12,6 +12,19 @@
@@ -545,12 +545,14 @@ index 23bbbcc..81676d6 100644
  // Load and fully relocate an ELF .so. Returns NULL on error; kl_error() explains.
  kl_image *kl_load(const char *path);
  // Load a klepton-ld-translated Mach-O dylib instead. dyld maps the guest
-@@ -23,6 +36,14 @@ kl_image *kl_load_dylib(const char *path);
+@@ -23,6 +36,16 @@ kl_image *kl_load_dylib(const char *path);
  // translation exists, else the ELF. Lets the boot chain run mixed while some
  // libraries are still untranslatable. Every guest-library load goes through it.
  kl_image *kl_load_auto(const char *path);
 +// e_entry of an executable image (NULL for a library).
 +void *kl_image_entry(kl_image *img);
++// in a fork()ed child: make the guest mutexes held at the fork usable again
++void kl_pthread_atfork_child(void);
 +// TLS symbols across images, for TLS relocations against another library's variable.
 +int kl_image_tls_symbol(kl_image *img, const char *name, void **module, uint64_t *off);
 +int kl_find_tls_symbol(const char *name, void **module, uint64_t *off);
@@ -560,7 +562,7 @@ index 23bbbcc..81676d6 100644
  
  // Could kl_load_auto load a guest library at `path`? Ask this — never
  // stat(path) — whenever answering an existence question about a guest library on
-@@ -125,6 +146,11 @@ void      kl_register_image(const char *soname, kl_image *img);
+@@ -125,6 +148,11 @@ void      kl_register_image(const char *soname, kl_image *img);
  kl_image *kl_find_image(const char *soname);
  // Load an .so plus its DT_NEEDED chain, dependencies first (kl_dl.c).
  kl_image *kl_load_recursive(const char *path);
@@ -572,3 +574,39 @@ index 23bbbcc..81676d6 100644
  // Read a file's DT_NEEDED sonames without loading it (kl_image.c).
  int       kl_list_needed(const char *path, char names[][128], int max);
  // Search every registered guest image for an export (kl_dl.c); used by the
+diff --git a/runtime/libc/kl_pthread.c b/runtime/libc/kl_pthread.c
+index aef7e05..60f430f 100644
+--- a/runtime/libc/kl_pthread.c
++++ b/runtime/libc/kl_pthread.c
+@@ -591,6 +591,31 @@ int klb_pthread_mutex_init(void *m, const void *a) {
+     mtx_log("init", m, (uint32_t)(e - g_mtx_map));
+     return 0;
+ }
++// After fork(), in the child. Darwin gives the child's thread a new thread id, so the host
++// mutexes it held as the parent's thread no longer count as its own and can't be unlocked, and
++// those other threads held don't have a holder left at all. Rebuild every held one: the
++// forking thread's (same pthread_self in the child) re-taken to the same depth, the rest free.
++// The old host mutexes leak: a held mutex can't be destroyed.
++static void mtx_rebuild_after_fork(mtx_entry *e, void *self) {
++    if (!atomic_load(&e->key) || !atomic_load(&e->owner)) return;
++    pthread_mutex_t *fresh = mtx_make();
++    if (!fresh) return;
++    if (atomic_load(&e->owner) == self) {
++        for (int d = atomic_load(&e->depth); d > 0; d--) pthread_mutex_lock(fresh);
++    } else {
++        atomic_store(&e->owner, NULL);
++        atomic_store(&e->locksite, NULL);
++        atomic_store(&e->depth, 0);
++    }
++    atomic_store(&e->m, fresh);
++}
++
++void kl_pthread_atfork_child(void) {
++    void *self = (void *)pthread_self();
++    for (unsigned i = 0; i < MTX_MAP_SIZE; i++) mtx_rebuild_after_fork(&g_mtx_map[i], self);
++    mtx_rebuild_after_fork(&g_mtx_overflow, self);
++}
++
+ int klb_pthread_mutex_lock(void *m) {
+     if (!m) return mtx_null("lock");
+     mtx_entry *e = mtx_entry_for(m);

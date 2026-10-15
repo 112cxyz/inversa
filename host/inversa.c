@@ -92,6 +92,11 @@ static int has_xarch_entitlement(void)
     return on;
 }
 
+static void print_image( const char *name, void *base, size_t span, void *ctx )
+{
+    fprintf( ctx, "inversa: image %p %p %s\n", base, (char *)base + span, name );
+}
+
 static int usage(void)
 {
     fprintf( stderr, "usage: inversa run <program> [args...]\n       inversa probe <program>\n" );
@@ -178,6 +183,7 @@ int main( int argc, char **argv )
 
     kl_image *img = kl_load_recursive( load );
     if (!img) { fprintf( stderr, "inversa: %s\n", kl_error() ); return 1; }
+    if (getenv( "INVERSA_IMAGES" )) kl_each_image( print_image, stderr );   /* to symbolise `sample` */
     if (probe || getenv( "INVERSA_REPORT" ))
     {
         unsigned n = 0;
