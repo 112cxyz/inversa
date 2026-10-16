@@ -65,15 +65,24 @@ $(BUILD)/inversa: $(SRCS) $(LOADER) $(wildcard kernel/*.h loader/*.h loader/*/*.
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(INC) -o $@ $(SRCS) $(LOADER) $(BUILD)/libklepton.a $(LDLIBS) -Wl,-platform_version,macos,11.0,11.0
 
-$(BUILD)/Inversa.app: $(BUILD)/inversa host/Info.plist host/entitlements.plist
+# the bundle's executable is a small launcher that starts inversa-core in a 4K-page process
+$(BUILD)/inversa-launch: host/launch.c
+	@mkdir -p $(BUILD)
+	$(CC) -O2 -arch arm64 -o $@ $< -framework Security -framework CoreFoundation
+
+# both executables carry the entitlement: the launcher to ask for 4K pages, the core to run in them
+$(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch host/Info.plist host/entitlements.plist
 	rm -rf $@ && mkdir -p $@/Contents/MacOS
-	cp $(BUILD)/inversa $@/Contents/MacOS/inversa
+	cp $(BUILD)/inversa-launch $@/Contents/MacOS/inversa
+	cp $(BUILD)/inversa $@/Contents/MacOS/inversa-core
 	sed 's/@ID@/$(BUNDLE_ID)/' host/Info.plist > $@/Contents/Info.plist
 	if [ -n "$(SIGN_ID)" ] && [ -f "$(PROFILE)" ]; then \
 	  cp "$(PROFILE)" $@/Contents/embedded.provisionprofile; \
+	  codesign -f -s "$(SIGN_ID)" -i $(BUNDLE_ID) --entitlements host/entitlements.plist $@/Contents/MacOS/inversa-core; \
 	  codesign -f -s "$(SIGN_ID)" --entitlements host/entitlements.plist $@; \
 	else \
 	  echo "note: no Developer ID + provisioning profile: signing ad hoc (16K pages, no low memory)"; \
+	  codesign -f -s - $@/Contents/MacOS/inversa-core; \
 	  codesign -f -s - $@; \
 	fi
 

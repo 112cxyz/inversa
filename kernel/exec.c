@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +35,17 @@ static long run_inversa( char *const *rest, char *const *envp )
     if (!argv) { errno = ENOMEM; return -1; }
     argv[0] = "inversa"; argv[1] = "run";
     memcpy( argv + 2, rest, count * sizeof *argv );
+    // already a 4K-page process: start the child in one too, rather than exec'ing normally and
+    // having it re-exec itself (a second load of everything)
+    if (getpagesize() == 0x1000)
+    {
+        posix_spawnattr_t attr;
+        posix_spawnattr_init( &attr );
+        posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC );
+        posix_spawnattr_set_4k_page_size_np( &attr );
+        posix_spawn( NULL, self, NULL, &attr, argv, envp );
+        posix_spawnattr_destroy( &attr );
+    }
     execve( self, argv, envp );
     int e = errno;
     free( argv );
