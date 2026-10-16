@@ -31,6 +31,8 @@
 void *mvr_glibc_lookup( const char *name );
 void *kl_shim_lookup( const char *name );
 void kl_pthread_atfork_child( void );
+void mvr_jit_after_fork_child( void );
+void inv_signal_after_fork_child( void );
 extern int inv_arm64_mode;
 const char *inv_guest_path( const char *path, char *buf );
 long inv_arm64_brk( uintptr_t requested );
@@ -61,7 +63,12 @@ static long sys_clone_process( uint64_t flags, long stack, long parent_tid, long
         stack || parent_tid || child_tid || tls)
         return fail( ENOSYS );
     pid_t pid = fork();
-    if (pid == 0) kl_pthread_atfork_child();   // the child's thread can unlock what it held again
+    if (pid == 0)
+    {
+        mvr_jit_after_fork_child();
+        inv_signal_after_fork_child();
+        kl_pthread_atfork_child();   // the child's thread can unlock what it held again
+    }
     return pid;
 }
 
@@ -476,6 +483,13 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     switch (nr)
     {
     case 17: return getcwd( (char *)a, (size_t)b ) ? (long)strlen( (char *)a ) + 1 : -1;
+    case 56: {
+        // Linux AT_FDCWD is -100; Darwin's is -2. The host openat shim
+        // translates flags but expects Darwin's directory descriptor.
+        typedef int (*openat_fn)( int, const char *, int, int );
+        openat_fn fn = (openat_fn)libc_fn( "openat" );
+        return fn ? fn( (int)a == -100 ? AT_FDCWD : (int)a, (const char *)b, (int)c, (int)d ) : fail( ENOSYS );
+    }
     case 29: return inv_ioctl( a, b, c );
     case 223: return 0;                                            // fadvise64: advice only
     case 221: return inv_execveat( -100, (const char *)a, (char *const *)b, (char *const *)c, 0 );
@@ -484,7 +498,13 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     case 61: return sys_getdents64( a, b, c );
     case 72: return sys_pselect6( a, b, c, d, e, f );
     case 93: inv_thread_exit( (int)a );
-    case 94: _exit( (int)a );
+    case 94:
+        if (getenv( "INVERSA_TIME" ) && getenv( "INVERSA_T0" ))
+        {
+            struct timespec t; clock_gettime( CLOCK_MONOTONIC, &t );
+            fprintf( stderr, "inversa: %7.1f ms  exit_group\n", t.tv_sec * 1e3 + t.tv_nsec / 1e6 - atof( getenv( "INVERSA_T0" ) ) );
+        }
+        _exit( (int)a );
     case 96: return inv_gettid();                                  // set_tid_address
     case 98: return sys_futex( a, b, c, d, e, f );
     case 115: return sys_clock_nanosleep( a, b, c, d );

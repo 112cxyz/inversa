@@ -26,6 +26,8 @@ make rootfs        # build/rootfs/x86_64 (bash, coreutils) and the arm64 librari
 
 `build/Inversa.app` is signed with a Developer ID and the cross-architecture entitlement when both are available (`SIGN_ID`, `PROFILE`). That gives the process 4K pages and memory below 4 GB, which Linux programs expect. Otherwise it's signed ad hoc.
 
+An x86-64 run now exits before loading FEX if the process still has 16K pages. For an experimental guest run, use `python3 tools/safe_run.py --timeout 10 --log /tmp/inversa-test.log -- build/Inversa.app/Contents/MacOS/inversa run <program> [args...]` from an environment where the watchdog can signal the process group. The runner limits CPU time and attempts to terminate the process group on exit or timeout. If group signaling is denied, it kills the direct child and reports a cleanup error; any descendants need separate inspection. A watchdog cannot protect against a macOS kernel panic; investigate JIT or VM faults in a disposable VM first.
+
 The experimental ARM64 loader that runs a program with its own Linux `ld.so` and glibc is enabled with `INVERSA_ARM64_LINUX=1`. It expects an ARM64 root at `build/rootfs/aarch64` or `INVERSA_ROOTFS`; the Klepton path remains the default.
 
 ## Layout

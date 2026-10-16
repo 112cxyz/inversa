@@ -18,6 +18,14 @@ static int nranges;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread int writing;     /* this thread's view of MAP_JIT memory */
 
+void mvr_jit_after_fork_child(void)
+{
+    // The hardware's per-thread JIT protection can reset across fork while this TLS
+    // value is copied from the parent. The child resumes translated code immediately.
+    pthread_jit_write_protect_np(1);
+    writing = 0;
+}
+
 void mvr_jit_register( void *addr, size_t len )
 {
     pthread_mutex_lock( &lock );

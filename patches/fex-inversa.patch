@@ -16,7 +16,7 @@ index 6e8df95..ce8e26c 100644
  
    // Load the values returned by the kernel
 diff --git a/Source/Common/HostFeatures.cpp b/Source/Common/HostFeatures.cpp
-index 858d76d..bcab933 100644
+index 858d76d..8958fdc 100644
 --- a/Source/Common/HostFeatures.cpp
 +++ b/Source/Common/HostFeatures.cpp
 @@ -613,6 +613,9 @@ FEXCore::HostFeatures FetchHostFeatures() {
@@ -44,6 +44,16 @@ index 858d76d..bcab933 100644
    // We need to get the CPU's cache line size
    // We expect sane targets that have correct cacheline sizes across clusters
    __asm volatile("mrs %[ctr], ctr_el0" : [ctr] "=r"(CTR));
+@@ -628,7 +637,9 @@ FEXCore::HostFeatures FetchHostFeatures() {
+ #endif
+ 
+   FEXCore::HostFeatures HostFeatures = {};
++#ifndef FEX_INVERSA   // (Inversa: the MIDR comes in with CPUFeatureRegisters; /sys would build a synthetic tree)
+   FillMIDRInformationViaLinux(&HostFeatures);
++#endif
+   FetchHostFeatures(Features, HostFeatures, true, CTR, MIDR);
+ 
+   HostFeatures.SupportsCPUIndexInTPIDRRO = false;
 diff --git a/Source/Common/Linux/SBRKAllocations.cpp b/Source/Common/Linux/SBRKAllocations.cpp
 index ae366ee..95e7de4 100644
 --- a/Source/Common/Linux/SBRKAllocations.cpp
@@ -86,13 +96,46 @@ index c2af587..666791a 100644
      DESTINATION bin
      COMPONENT Runtime)
 diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-index 52bdba1..10dbf93 100644
+index 52bdba1..eed2987 100644
 --- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
 +++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
-@@ -383,7 +383,13 @@ static int StealFEXFDFromEnv(const char* Env) {
+@@ -8,6 +8,7 @@ $end_info$
+ 
+ #include "Common/ArgumentLoader.h"
+ #include "Common/FEXServerClient.h"
++#include <time.h>
+ #include "Common/Config.h"
+ #include "Common/HostFeatures.h"
+ #include "Common/Linux/LinuxVersion.h"
+@@ -257,6 +258,10 @@ bool QueryInterpreterInstalled(bool ExecutedWithFD, const FEX::Config::PortableI
+     return false;
+   }
+ 
++#ifdef FEX_INVERSA
++  // Inversa is never a binfmt_misc interpreter, and asking /proc costs a synthetic /proc build
++  return ExecutedWithFD;
++#endif
+   // Check if FEX's binfmt_misc handlers are both installed.
+   // The explicit check can be omitted if FEX was executed from an FD,
+   // since this only happens if the kernel launched FEX through binfmt_misc
+@@ -383,14 +388,38 @@ static int StealFEXFDFromEnv(const char* Env) {
    return FEXFD;
  }
  
++
++#ifdef FEX_INVERSA
++// INVERSA_TIME=1: milliseconds since Inversa's first exec at each FEX start-up step
++static void InversaStage(const char* What) {
++  static const char* T0 = getenv("INVERSA_TIME") ? getenv("INVERSA_T0") : nullptr;
++  if (!T0) return;
++  struct timespec t;
++  clock_gettime(CLOCK_MONOTONIC, &t);
++  fprintf(stderr, "inversa: %7.1f ms  fex: %s\n", t.tv_sec * 1e3 + t.tv_nsec / 1e6 - atof(T0), What);
++}
++#define INVERSA_STAGE(x) InversaStage(x)
++#else
++#define INVERSA_STAGE(x)
++#endif
 +#ifdef FEX_INVERSA
 +// Inversa loads FEX as a shared object (its TLS then goes through TLSDESC, which the loader
 +// serves; an executable's local-exec TLS would land in Darwin's own TSD slots) and calls this
@@ -100,10 +143,43 @@ index 52bdba1..10dbf93 100644
 +#else
  int main(int argc, char** argv, char** const envp) {
 +#endif
++  INVERSA_STAGE("main");
    auto SBRKPointer = FEX::SBRKAllocations::DisableSBRKAllocations();
    FEXCore::Allocator::GLIBCScopedFault GLIBFaultScope;
  
-@@ -440,10 +446,13 @@ int main(int argc, char** argv, char** const envp) {
++  INVERSA_STAGE("sbrk+fault scope");
+   const bool ExecutedWithFD = getauxval(AT_EXECFD) != 0;
+   const auto PortableInfo = FEX::ReadPortabilityInformation();
++  INVERSA_STAGE("portability info");
+   const bool InterpreterInstalled = QueryInterpreterInstalled(ExecutedWithFD, PortableInfo);
+ 
++  INVERSA_STAGE("interpreter query");
+   int FEXFD {StealFEXFDFromEnv("FEX_EXECVEFD")};
+   int FEXSeccompFD {StealFEXFDFromEnv("FEX_SECCOMPFD")};
+   const bool FEXFDPathBacked = getenv("FEX_EXECVEFD_PATH") != nullptr;
+@@ -400,9 +429,11 @@ int main(int argc, char** argv, char** const envp) {
+   LogMan::Throw::InstallHandler(FEX::Logging::AssertHandler);
+   LogMan::Msg::InstallHandler(FEX::Logging::MsgHandler);
+ 
++  INVERSA_STAGE("before arg loader");
+   auto ArgsLoader = fextl::make_unique<FEX::ArgLoader::ArgLoader>(argc, argv);
+   auto Args = ArgsLoader->Get();
+   auto ParsedArgs = ArgsLoader->GetParsedArgs();
++  INVERSA_STAGE("args");
+   auto Program = FEX::Config::GetApplicationNames(Args, ExecutedWithFD, FEXFD);
+   if (Program.ProgramPath.empty() && FEXFD == -1) {
+     // Early exit if we weren't passed an argument
+@@ -411,7 +442,9 @@ int main(int argc, char** argv, char** const envp) {
+ 
+   FEX::Kernel::GCS::CheckForGCS();
+ 
++  INVERSA_STAGE("args parsed (before config)");
+   FEX::Config::LoadConfig(Program.ProgramName, envp, PortableInfo);
++  INVERSA_STAGE("config");
+ 
+   // Reload the meta layer
+   FEXCore::Config::ReloadMetaLayer();
+@@ -440,10 +473,13 @@ int main(int argc, char** argv, char** const envp) {
  
    // Ensure FEXServer is setup before config options try to pull CONFIG_ROOTFS
    auto SelfPath = FEX::GetSelfPath();
@@ -117,19 +193,80 @@ index 52bdba1..10dbf93 100644
  
    FEX_CONFIG_OPT(LDPath, ROOTFS);
    FEX_CONFIG_OPT(Environment, ENV);
+@@ -492,6 +528,7 @@ int main(int argc, char** argv, char** const envp) {
+   }
+ 
+   ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
++  INVERSA_STAGE("ELF opened");
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Loader.Is64BitMode() ? "1" : "0");
+ 
+   if (!Loader.ELFWasLoaded()) {
+@@ -552,6 +589,7 @@ int main(int argc, char** argv, char** const envp) {
+   {
+     auto HostFeatures = FEX::FetchHostFeatures();
+     CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
++  INVERSA_STAGE("context");
+     SupportsAVX = HostFeatures.SupportsAVX;
+     SupportsSVE256 = HostFeatures.SupportsSVE256;
+   }
+@@ -559,6 +597,7 @@ int main(int argc, char** argv, char** const envp) {
+   FEX::Kernel::Init(Loader.Is64BitMode(), CTX.get());
+ 
+   auto SignalDelegation = FEX::HLE::CreateSignalDelegator(CTX.get(), Program.ProgramName, SupportsAVX, SupportsSVE256);
++  INVERSA_STAGE("signal delegator");
+   auto ThunkHandler = FEX::HLE::CreateThunkHandler();
+ 
+   auto SyscallHandler = Loader.Is64BitMode() ?
+@@ -588,12 +627,15 @@ int main(int argc, char** argv, char** const envp) {
+     SyscallHandler->FM.TrackFEXFD(FEX::Logging::FEXServer::FEXServerFD);
+   }
+ 
++  INVERSA_STAGE("syscall handler (before InitCore)");
+   if (!CTX->InitCore()) {
+     return 1;
+   }
+ 
+   // Create a thread without a RIP or stack pointer setup initially.
++  INVERSA_STAGE("InitCore done");
+   auto ParentThread = SyscallHandler->TM.CreateThread();
++  INVERSA_STAGE("core up, thread created");
+   SyscallHandler->TM.TrackThread(ParentThread);
+   SignalDelegation->RegisterTLSState(ParentThread);
+   ThunkHandler->RegisterTLSState(ParentThread);
+@@ -639,6 +681,7 @@ int main(int argc, char** argv, char** const envp) {
+   // Close the loader FDs after everything has been parsed and mapped.
+   Loader.CloseFDs();
+ 
++  INVERSA_STAGE("guest starts");
+   CTX->ExecuteThread(ParentThread->Thread);
+ 
+   DebugServer.reset();
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432b..013de58 100644
+index a7a432b..69d8be0 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-@@ -899,12 +899,25 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+@@ -44,6 +44,7 @@ $end_info$
+ #include <algorithm>
+ #include <alloca.h>
+ #include <charconv>
++#include <fcntl.h>
+ #include <functional>
+ #include <linux/audit.h>
+ #include <linux/seccomp.h>
+@@ -899,12 +900,30 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
    const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
    const auto Is64Bit = Is64BitMode();
  
 +#ifdef FEX_INVERSA
 +  // INVERSA_GSTRACE=1: the guest's syscalls as it makes them
 +  static const bool GStrace = getenv("INVERSA_GSTRACE") != nullptr;
++  static int GStraceFD = -2;
++  if (GStrace && GStraceFD == -2) {
++    const char* Path = getenv("INVERSA_GSTRACE_FILE");
++    GStraceFD = Path ? open(Path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600) : 2;
++  }
 +  if (GStrace) {
-+    fprintf(stderr, "[guest] %lu(%#lx, %#lx, %#lx) ...\n", (unsigned long)GetArg(Is64Bit, Frame, 0), (unsigned long)GetArg(Is64Bit, Frame, 1),
++    dprintf(GStraceFD, "[guest %d] %lu(%#lx, %#lx, %#lx) ...\n", getpid(), (unsigned long)GetArg(Is64Bit, Frame, 0), (unsigned long)GetArg(Is64Bit, Frame, 1),
 +            (unsigned long)GetArg(Is64Bit, Frame, 2), (unsigned long)GetArg(Is64Bit, Frame, 3));
 +  }
 +#endif
@@ -141,7 +278,7 @@ index a7a432b..013de58 100644
    }
 +#ifdef FEX_INVERSA
 +  if (GStrace) {
-+    fprintf(stderr, "[guest]   = %ld\n", (long)Frame->State.gregs[FEXCore::X86State::REG_RAX]);
++    dprintf(GStraceFD, "[guest %d]   = %ld\n", getpid(), (long)Frame->State.gregs[FEXCore::X86State::REG_RAX]);
 +  }
 +#endif
  

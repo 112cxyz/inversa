@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -103,8 +104,26 @@ static int usage(void)
     return 2;
 }
 
+/* INVERSA_TIME=1: milliseconds since the first exec, at each start-up stage */
+static double t0;
+static void stage( const char *what )
+{
+    static int on = -1;
+    if (on < 0) on = getenv( "INVERSA_TIME" ) != NULL;
+    if (!on) return;
+    struct timespec t; clock_gettime( CLOCK_MONOTONIC, &t );
+    fprintf( stderr, "inversa: %7.1f ms  %s\n", t.tv_sec * 1e3 + t.tv_nsec / 1e6 - t0, what );
+}
+
 int main( int argc, char **argv )
 {
+    {
+        struct timespec t; clock_gettime( CLOCK_MONOTONIC, &t );
+        const char *e = getenv( "INVERSA_T0" );
+        t0 = e ? atof( e ) : t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+        if (!e) { char b[32]; snprintf( b, sizeof b, "%.3f", t0 ); setenv( "INVERSA_T0", b, 1 ); }
+        stage( "main" );
+    }
     if (argc < 3) return usage();
     int probe = !strcmp( argv[1], "probe" );
     if (!probe && strcmp( argv[1], "run" )) return usage();
@@ -118,9 +137,7 @@ int main( int argc, char **argv )
         return 1;
     }
 
-    if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ) && !has_xarch_entitlement())
-        fprintf( stderr, "inversa: not signed with the cross-architecture entitlement: 16K pages, no memory below 4 GB\n" );
-    else if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ))
+    if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ) && has_xarch_entitlement())
     {
         /* Linux code expects 4K pages, and MAP_JIT at a fixed address needs them: re-exec
          * ourselves as a 4K-page process (needs the cross-architecture entitlement) */
@@ -130,7 +147,13 @@ int main( int argc, char **argv )
         posix_spawnattr_set_4k_page_size_np( &attr );
         char exe[1024]; uint32_t n = sizeof exe;
         if (!_NSGetExecutablePath( exe, &n )) posix_spawn( NULL, exe, NULL, &attr, argv, environ );
-        fprintf( stderr, "inversa: no 4K pages (unsigned build?), continuing with %dK\n", getpagesize() / 1024 );
+        fprintf( stderr, "inversa: 4K page re-exec failed; still using %dK pages\n", getpagesize() / 1024 );
+    }
+    if (machine == EM_X86_64 && getpagesize() != 0x1000)
+    {
+        fprintf( stderr, "inversa: x86-64 requires 4K pages and the cross-architecture entitlement (current page size: %dK)\n",
+                 getpagesize() / 1024 );
+        return 1;
     }
     /* linked for macOS 11 so XNU keeps x18 (see mvr-native) */
     setenv( "KL_X18", "0", 0 );
@@ -160,6 +183,7 @@ int main( int argc, char **argv )
     snprintf( path, sizeof path, "%s/../rootfs/x86_64", dir );
     if (machine == EM_X86_64 && !access( path, R_OK )) setenv( "FEX_ROOTFS", path, 0 );
 
+    stage( "after 4K re-exec" );
     if (mvr_tls_init()) return 1;
     mvr_glibc_init();
     inv_kernel_init();
@@ -181,7 +205,9 @@ int main( int argc, char **argv )
         return 1;
     }
 
+    stage( "runtime set up" );
     kl_image *img = kl_load_recursive( load );
+    stage( "loaded, relocated, constructors run" );
     if (!img) { fprintf( stderr, "inversa: %s\n", kl_error() ); return 1; }
     if (getenv( "INVERSA_IMAGES" )) kl_each_image( print_image, stderr );   /* to symbolise `sample` */
     if (probe || getenv( "INVERSA_REPORT" ))
@@ -208,5 +234,6 @@ int main( int argc, char **argv )
     char **fargv = calloc( (size_t)argc, sizeof *fargv );
     fargv[0] = (char *)"FEX";
     for (int i = 2; i < argc; i++) fargv[i - 1] = argv[i];
+    stage( "entering FEX" );
     return fex_main( argc - 1, fargv, environ );
 }

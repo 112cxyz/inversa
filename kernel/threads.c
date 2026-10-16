@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <string.h>
 #include <sys/ucontext.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 long inv_tkill( long tid, long sig )
 {
@@ -29,6 +31,29 @@ void inv_thread_exit( int code ) { pthread_exit( NULL ); }
 // and copy any register changes back before returning to the interrupted code.
 struct linux_action { uint64_t handler, flags, restorer, mask; };
 static struct linux_action actions[65];
+static volatile sig_atomic_t fault_trace_count;
+static int fault_trace_enabled;
+
+void inv_signal_after_fork_child(void) { fault_trace_count = 0; }
+
+static void trace_fault( int sig, uintptr_t pc, uintptr_t addr, uint32_t esr, uintptr_t handler )
+{
+    if (!fault_trace_enabled || fault_trace_count++ >= 16) return;
+    char line[200], *p = line;
+    const char *names[] = { "pid", "sig", "pc", "addr", "esr", "handler" };
+    uintptr_t values[] = { (uintptr_t)getpid(), (uintptr_t)sig, pc, addr, esr, handler };
+    const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 6; i++)
+    {
+        if (i) *p++ = ' ';
+        for (const char *s = names[i]; *s; s++) *p++ = *s;
+        *p++ = '='; *p++ = '0'; *p++ = 'x';
+        for (int shift = 60; shift >= 0; shift -= 4) *p++ = hex[(values[i] >> shift) & 15];
+    }
+    *p++ = '\n';
+    int fd = open( "/tmp/inversa-fault-trace.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600 );
+    if (fd >= 0) { write( fd, line, p - line ); close( fd ); }
+}
 
 struct linux_stack { uint64_t sp; int32_t flags, pad; uint64_t size; };
 struct linux_mcontext {
@@ -71,6 +96,9 @@ static void deliver( int darwin_sig, siginfo_t *info, void *raw )
         if (mvr_jit_fault( is_exec ? (void *)ss->__pc : info->si_addr, is_write, is_exec )) return;
     }
     int sig = inv_sig_to_linux( darwin_sig );
+    if (darwin_sig == SIGSEGV || darwin_sig == SIGBUS)
+        trace_fault( sig, ss->__pc, (uintptr_t)info->si_addr, host->uc_mcontext->__es.__esr,
+                     sig ? actions[sig].handler : 0 );
     if (!sig || actions[sig].handler <= 1) return;
     struct linux_ucontext linux = {0};
     struct linux_siginfo li = {0};
@@ -132,6 +160,7 @@ static void deliver( int darwin_sig, siginfo_t *info, void *raw )
 
 void inv_signal_installed( int sig, const void *action )
 {
+    if (getenv( "INVERSA_FAULT_TRACE" )) fault_trace_enabled = 1;
     int darwin = inv_sig_to_darwin( sig );
     if (!darwin) return;
     actions[sig] = *(const struct linux_action *)action;
