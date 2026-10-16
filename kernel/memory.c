@@ -25,8 +25,6 @@ void mvr_jit_unmap( void *addr, size_t len );
 void mvr_jit_register( void *addr, size_t len );
 
 int inv_x86_mode;
-extern int inv_arm64_mode;
-void *inv_map_code( void *addr, size_t len, int fixed, int fd, off_t off );
 
 enum { L_SHARED = 0x01, L_FIXED = 0x10, L_ANON = 0x20, L_NOREPLACE = 0x100000 };
 #define PAGE 0x1000ull

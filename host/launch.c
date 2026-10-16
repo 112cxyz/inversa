@@ -1,8 +1,7 @@
 // The bundle's executable: put the real inversa (inversa-core, beside it) in a 4K-page process
 // in one step. The core links Klepton's frameworks, which cost a few milliseconds to load each
 // time; doing the 4K re-exec from here means they load once.
-#include <CoreFoundation/CoreFoundation.h>
-#include <Security/Security.h>
+#include "entitlement.h"
 #include <mach-o/dyld.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -12,17 +11,6 @@
 
 extern char **environ;
 
-static int entitled(void)
-{
-    SecTaskRef task = SecTaskCreateFromSelf( NULL );
-    if (!task) return 0;
-    CFTypeRef v = SecTaskCopyValueForEntitlement( task, CFSTR( "com.apple.developer.cross-architecture-support" ), NULL );
-    int on = v && CFGetTypeID( v ) == CFBooleanGetTypeID() && CFBooleanGetValue( (CFBooleanRef)v );
-    if (v) CFRelease( v );
-    CFRelease( task );
-    return on;
-}
-
 int main( int argc, char **argv )
 {
     char core[1024]; uint32_t n = sizeof core;
@@ -30,7 +18,7 @@ int main( int argc, char **argv )
     char *slash = strrchr( core, '/' );
     if (!slash || (size_t)(slash - core) + sizeof "/inversa-core" > sizeof core) return 1;
     strcpy( slash, "/inversa-core" );
-    if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ) && entitled())
+    if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ) && has_xarch_entitlement())
     {
         posix_spawnattr_t attr;
         posix_spawnattr_init( &attr );

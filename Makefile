@@ -61,20 +61,27 @@ $(BUILD)/klepton/%.o: $(KLEPTON)/%
 	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 
 # guest code treats x18 as a scratch register; XNU only preserves it for binaries built for macOS 11
-$(BUILD)/inversa: $(SRCS) $(LOADER) $(wildcard kernel/*.h loader/*.h loader/*/*.h) $(BUILD)/libklepton.a
+$(BUILD)/inversa: $(SRCS) $(LOADER) $(wildcard host/*.h kernel/*.h loader/*.h loader/*/*.h) $(BUILD)/libklepton.a
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(INC) -o $@ $(SRCS) $(LOADER) $(BUILD)/libklepton.a $(LDLIBS) -Wl,-platform_version,macos,11.0,11.0
 
 # the bundle's executable is a small launcher that starts inversa-core in a 4K-page process
-$(BUILD)/inversa-launch: host/launch.c
+$(BUILD)/inversa-launch: host/launch.c host/entitlement.h
 	@mkdir -p $(BUILD)
 	$(CC) -O2 -arch arm64 -o $@ $< -framework Security -framework CoreFoundation
 
+$(BUILD)/Inversa.icns: tools/make_icon.swift
+	@mkdir -p $(BUILD)
+	rm -rf $(BUILD)/Inversa.iconset
+	swift tools/make_icon.swift $(BUILD)/Inversa.iconset
+	iconutil -c icns -o $@ $(BUILD)/Inversa.iconset
+
 # both executables carry the entitlement: the launcher to ask for 4K pages, the core to run in them
-$(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch host/Info.plist host/entitlements.plist
-	rm -rf $@ && mkdir -p $@/Contents/MacOS
+$(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.icns host/Info.plist host/entitlements.plist
+	rm -rf $@ && mkdir -p $@/Contents/MacOS $@/Contents/Resources
 	cp $(BUILD)/inversa-launch $@/Contents/MacOS/inversa
 	cp $(BUILD)/inversa $@/Contents/MacOS/inversa-core
+	cp $(BUILD)/Inversa.icns $@/Contents/Resources/
 	sed 's/@ID@/$(BUNDLE_ID)/' host/Info.plist > $@/Contents/Info.plist
 	if [ -n "$(SIGN_ID)" ] && [ -f "$(PROFILE)" ]; then \
 	  cp "$(PROFILE)" $@/Contents/embedded.provisionprofile; \

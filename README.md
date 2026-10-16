@@ -1,43 +1,109 @@
 # Inversa
 
-Run Linux programs on Apple silicon Macs, without a VM:
+Run Linux programs on Apple silicon Macs without a VM:
 
-- **Linux ARM64** programs natively, loaded by [Klepton](https://github.com/shinyquagsire23/Klepton).
-- **Linux x86-64** programs through [FEX](https://github.com/FEX-Emu/FEX), itself built for Linux ARM64 and loaded the same way.
+- **Linux ARM64** programs run natively, loaded by [Klepton](https://github.com/shinyquagsire23/Klepton).
+- **Linux x86-64** programs run through [FEX](https://github.com/FEX-Emu/FEX), itself built for Linux ARM64 and loaded the same way.
 
-Both sit on Inversa's own kernel layer (`kernel/`), which implements the Linux syscall ABI on top of Darwin.
+Both run on Inversa's own kernel layer (`kernel/`), which implements the Linux syscall ABI on top of Darwin.
 
 ```
 inversa run <program> [args...]
-inversa probe <program>          # load it and list what doesn't resolve
+inversa probe <program>          # load it, list what doesn't resolve, run nothing
 ```
 
 ## Building
 
-Needs Xcode's command-line tools and Homebrew (`brew install llvm lld ninja cmake vulkan-headers`).
+You need Xcode's command-line tools and Homebrew:
 
 ```
+brew install llvm lld ninja cmake vulkan-headers
 tools/setup.sh     # FEX and Klepton at their pinned commits, with patches/ applied
 make sysroot       # Debian arm64 sysroot for cross-building FEX
 make fex           # build/lib/libFEXInversa.so
 make               # build/Inversa.app
 make rootfs        # build/rootfs/x86_64 (bash, coreutils) and the arm64 libraries FEX links against
+make tests         # tests/build/hello_x64
 ```
 
-`build/Inversa.app` is signed with a Developer ID and the cross-architecture entitlement when both are available (`SIGN_ID`, `PROFILE`). That gives the process 4K pages and memory below 4 GB, which Linux programs expect. Otherwise it's signed ad hoc.
+The app is signed with a Developer ID, the cross-architecture entitlement and its provisioning profile when they are all available (`SIGN_ID`, `PROFILE`). Without them it is signed ad hoc, and the process keeps 16K pages and has no memory below 4 GB. x86-64 programs then refuse to start, though `probe` still works.
 
-An x86-64 run now exits before loading FEX if the process still has 16K pages. For an experimental guest run, use `python3 tools/safe_run.py --timeout 10 --log /tmp/inversa-test.log -- build/Inversa.app/Contents/MacOS/inversa run <program> [args...]` from an environment where the watchdog can signal the process group. The runner limits CPU time and attempts to terminate the process group on exit or timeout. If group signaling is denied, it kills the direct child and reports a cleanup error; any descendants need separate inspection. A watchdog cannot protect against a macOS kernel panic; investigate JIT or VM faults in a disposable VM first.
+If the keychain lookup fails during the build, the app is silently signed ad hoc. Check it with:
 
-The experimental ARM64 loader that runs a program with its own Linux `ld.so` and glibc is enabled with `INVERSA_ARM64_LINUX=1`. It expects an ARM64 root at `build/rootfs/aarch64` or `INVERSA_ROOTFS`; the Klepton path remains the default.
+```
+codesign -d --entitlements - build/Inversa.app
+```
+
+## How it works
+
+1. `Contents/MacOS/inversa` (`host/launch.c`) is a small launcher. It starts `inversa-core` in a 4K-page process in a single spawn, which Linux code and FEX's fixed-address `MAP_JIT` both need.
+2. `inversa-core` (`host/inversa.c`) reads the ELF machine type.
+   - **ARM64 programs:** Klepton loads the program itself.
+   - **x86-64 programs:** Klepton loads `libFEXInversa.so`, given the CPU's features (`host/cpu.c`) and the x86-64 root in `rootfs/x86_64`.
+3. Guest code calls into a glibc ABI layered over Darwin's libc (`loader/glibc`).
+4. Raw syscalls arrive at `inv_syscall` (`kernel/kernel.c`). FEX makes all of its syscalls, and passes on all of the guest's, through `syscall()`; `patches/fex-inversa.patch` removes its raw `svc` instructions.
+   - Calls that mean the same as a libc function are forwarded to that function.
+   - The rest are written out in `kernel/`: memory, file lookups inside a root, stat layouts, futexes, signals, fork and exec, ioctls.
+5. `fork`ed children rebuild Klepton's mutexes and reset JIT state before running guest code. Guest `execve` of another Linux program becomes another `inversa run`, already in 4K pages.
+
+An experimental ARM64 loader runs a program on its own Linux `ld.so` and glibc instead (`kernel/linux.c`, `INVERSA_ARM64_LINUX=1`). It expects an ARM64 root at `build/rootfs/aarch64` or `INVERSA_ROOTFS`.
 
 ## Layout
 
 | | |
 |---|---|
-| `host/` | the `inversa` command: picks the path by ELF machine, feeds FEX the CPU's features |
-| `kernel/` | Linux syscalls on Darwin: memory, files (`openat2` inside a root), stat layouts, futexes, signals, threads |
-| `loader/` | the glibc ABI over Darwin libc, ELF TLS, JIT memory, crash reports |
-| `third_party/` | FEX and Klepton (submodules); `patches/` holds what Inversa changes in them |
-| `tools/` | Debian root/sysroot fetcher, cross toolchain file, symbolizer |
+| `host/` | the launcher and `inversa` command, CPU feature registers for FEX, `Info.plist`, entitlements |
+| `kernel/` | the Linux syscall layer (`kernel.h` lists what each file provides); `syscall_names.h` is generated by `tools/gen_syscalls.py` |
+| `loader/` | the glibc ABI over Darwin, ELF TLS, JIT memory, crash reports, Steam paths |
+| `third_party/` | FEX and Klepton as submodules; `patches/` holds Inversa's changes to them |
+| `tests/` | `check.py`, the regression set, and a static x86-64 test program |
+| `bench/` | a CPU benchmark run natively, under Rosetta, Inversa and Wine |
+| `tools/` | Debian root and sysroot fetcher, cross toolchain file, icon, FEX symboliser, `safe_run.py` |
 
-Debugging: `INVERSA_STRACE=1` (host-side syscalls), `INVERSA_GSTRACE=1` (the guest's x86-64 syscalls), `MVR_CRASH_REGS=1` / `MVR_CRASH_STACK=1` (more in crash reports).
+## Testing
+
+```
+python3 tests/check.py              # all of it
+python3 tests/check.py pipe subst   # some of it
+```
+
+Each case runs under `tools/safe_run.py`, which caps CPU time and kills the whole process group on exit or timeout. Use it for any experimental run as well:
+
+```
+python3 tools/safe_run.py --timeout 10 --log /tmp/inversa.log -- build/Inversa.app/Contents/MacOS/inversa run <program>
+```
+
+The watchdog needs permission to signal its child, so run it outside a restrictive sandbox. It can't protect against a macOS kernel panic. Look into JIT or VM faults in a disposable VM first, and don't run under lldb with both `INVERSA_NO_4K` and `INVERSA_NO_CRASH_HANDLER` set.
+
+Known failure: a second `fork` that runs bash code without an `exec` hangs on its pipe, for example `( echo a ); echo $(echo b)`. `check.py` reports these as `known`.
+
+## Benchmarks
+
+`bench/run.py` compares `bench/cpubench.c` across translators. Build the binaries into `build/bench` first. The Linux ones need an x86-64 sysroot (`python3 tools/fetch_rootfs.py amd64 build/sysroot-x86_64 libc6-dev libgcc-14-dev linux-libc-dev`), and the Windows ones need llvm-mingw.
+
+## Debugging
+
+| Variable | Effect |
+|---|---|
+| `INVERSA_STRACE=1` | each syscall the kernel layer serves |
+| `INVERSA_STRACE=names` | also list forwarded syscalls that have no libc function behind them |
+| `INVERSA_GSTRACE=1` | the guest's x86-64 syscalls, as FEX sees them (`INVERSA_GSTRACE_FILE` to write them to a file) |
+| `INVERSA_TIME=1` | milliseconds since the first exec at each start-up stage |
+| `INVERSA_IMAGES=1` | the address range of every loaded image, for symbolising `sample` output |
+| `INVERSA_REPORT=1` | unresolved and null weak imports, as `probe` prints them, before running |
+| `INVERSA_FAULT_TRACE=1` | the first 16 faults handed to the guest's signal handlers, per process |
+| `MVR_CRASH_REGS=1`, `MVR_CRASH_STACK=1` | more registers and stack in crash reports |
+| `MVR_TRACE=1` | trace some of the glibc layer's calls (Klepton fallbacks, readlink, semget) |
+| `INVERSA_NO_4K=1` | stay in 16K pages |
+| `INVERSA_NO_CRASH_HANDLER=1` | leave crashes to the system |
+| `INVERSA_FEX` | load a different `libFEXInversa.so` |
+| `INVERSA_VULKAN_DRIVER=moltenvk` | use MoltenVK rather than KosmicKrisp |
+| `INVERSA_ARM64_LINUX=1`, `INVERSA_ROOTFS` | the experimental ARM64 loader and its root |
+
+`tools/fexsym.py <offset>...` turns offsets in `libFEXInversa.so` into FEX function names.
+
+## Credits
+
+- [FEX](https://github.com/FEX-Emu/FEX): MIT licence.
+- [Klepton](https://github.com/shinyquagsire23/Klepton): MIT licence.
+- The guest roots and sysroots are unpacked from Debian packages, each under its own licence.

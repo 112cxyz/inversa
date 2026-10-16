@@ -1,6 +1,7 @@
 // The guest libc functions Inversa adds: syscall() itself, and the ones FEX imports that the
 // glibc layer below doesn't serve.
 #include "kernel.h"
+#include "syscall_names.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -21,7 +22,7 @@ static long zero(void) { return 0; }
 
 static long g_statx( long dirfd, const char *path, long flags, long mask, void *buf )
 {
-    return inv_syscall( 291, dirfd, (long)path, flags, mask, (long)buf, 0 );
+    return inv_syscall( NR_statx, dirfd, (long)path, flags, mask, (long)buf, 0 );
 }
 // Klepton's dup2 refuses stdout/stderr as targets (an Android-app guard); a Linux program
 // redirecting into a pipe needs exactly that
@@ -34,23 +35,9 @@ static long g_dup3( long from, long to, long flags )
     return r;
 }
 static long g_execve( const char *path, char *const *argv, char *const *envp ) { return inv_execveat( -100, path, argv, envp, 0 ); }
-// INVERSA_LOCKDEBUG=1: name a caller spinning on a mutex it can't get (a lock whose holder
-// didn't survive fork, say)
-int klb_pthread_mutex_trylock( void *m );
-static long g_mutex_trylock( void *m )
-{
-    static __thread unsigned fails;
-    static __thread void *last;
-    long r = klb_pthread_mutex_trylock( m );
-    void *ra = __builtin_return_address( 0 );
-    if (!r || ra != last) { fails = 0; last = ra; return r; }
-    if (++fails == 2000)
-        fprintf( stderr, "inversa: pid %d spinning on mutex %p from %p\n", getpid(), m, ra );
-    return r;
-}
-static long g_uname( void *buf ) { return inv_syscall( 160, (long)buf, 0, 0, 0, 0, 0 ); }
-static long g_sigaltstack( const void *ss, void *old ) { return inv_syscall( 132, (long)ss, (long)old, 0, 0, 0, 0 ); }
-static long g_getdents64( long fd, long buf, long n ) { return inv_syscall( 61, fd, buf, n, 0, 0, 0 ); }
+static long g_uname( void *buf ) { return inv_syscall( NR_uname, (long)buf, 0, 0, 0, 0, 0 ); }
+static long g_sigaltstack( const void *ss, void *old ) { return inv_syscall( NR_sigaltstack, (long)ss, (long)old, 0, 0, 0, 0 ); }
+static long g_getdents64( long fd, long buf, long n ) { return inv_syscall( NR_getdents64, fd, buf, n, 0, 0, 0 ); }
 static long g_tgkill( long pid, long tid, long sig ) { return inv_tkill( tid, sig ); }
 static long g_getcpu( unsigned *cpu, unsigned *node ) { if (cpu) *cpu = 0; if (node) *node = 0; return 0; }
 static long g_creat( const char *path, long mode )
@@ -78,16 +65,13 @@ static long g_fflush_unlocked( void *f )
     return ((fflush_fn)mvr_glibc_lookup( "fflush" ))( f );
 }
 
-void *inv_mmap( void *addr, size_t len, long prot, long flags, long fd, long off );
-long inv_munmap( void *addr, size_t len );
-long inv_mprotect( void *addr, size_t len, long prot );
-
 static const struct { const char *name; void *fn; } table[] = {
     { "syscall", inv_syscall }, { "mmap", inv_mmap }, { "mmap64", inv_mmap }, { "munmap", inv_munmap },
     { "mprotect", inv_mprotect },
     { "dup2", g_dup2 }, { "dup3", g_dup3 }, { "execve", g_execve },
     { "uname", g_uname }, { "statx", g_statx },
-    { "fstatat", inv_fstatat }, { "fstatat64", inv_fstatat }, { "fstat", inv_fstat }, { "fstat64", inv_fstat }, { "sigaltstack", g_sigaltstack }, { "getdents64", g_getdents64 }, { "tgkill", g_tgkill }, { "getcpu", g_getcpu },
+    { "fstatat", inv_fstatat }, { "fstatat64", inv_fstatat }, { "fstat", inv_fstat }, { "fstat64", inv_fstat },
+    { "sigaltstack", g_sigaltstack }, { "getdents64", g_getdents64 }, { "tgkill", g_tgkill }, { "getcpu", g_getcpu },
     { "creat", g_creat }, { "creat64", g_creat }, { "shm_open", g_shm_open }, { "shm_unlink", shm_unlink },
     { "lremovexattr", g_lremovexattr }, { "munlock", g_munlock },
     { "pthread_attr_getdetachstate", g_attr_getdetachstate },
@@ -101,9 +85,6 @@ static const struct { const char *name; void *fn; } table[] = {
 
 void *inv_libc_lookup( const char *name )
 {
-    static int lockdebug = -1;
-    if (lockdebug < 0) lockdebug = getenv( "INVERSA_LOCKDEBUG" ) != NULL;
-    if (lockdebug && !strcmp( name, "pthread_mutex_trylock" )) return g_mutex_trylock;
     for (size_t i = 0; i < sizeof table / sizeof table[0]; i++)
         if (!strcmp( table[i].name, name )) return table[i].fn;
     return NULL;

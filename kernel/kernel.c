@@ -28,15 +28,10 @@
 #include <time.h>
 #include <unistd.h>
 
-void *mvr_glibc_lookup( const char *name );
-void *kl_shim_lookup( const char *name );
+void *mvr_glibc_lookup( const char *name );   // loader/glibc
+void *kl_shim_lookup( const char *name );     // Klepton
 void kl_pthread_atfork_child( void );
-void mvr_jit_after_fork_child( void );
-void inv_signal_after_fork_child( void );
-extern int inv_arm64_mode;
-const char *inv_guest_path( const char *path, char *buf );
-long inv_arm64_brk( uintptr_t requested );
-long inv_ioctl( long fd, long request, long arg );
+void mvr_jit_after_fork_child( void );        // loader/jit.c
 
 // the guest libc as a guest sees it: the glibc layer's overrides, then Klepton's own table
 static void *libc_fn( const char *name )
@@ -49,9 +44,31 @@ typedef long (*sysfn)( long, long, long, long, long, long );
 
 #define NSYS (sizeof linux_syscall_names / sizeof linux_syscall_names[0])
 
+static const char *syscall_name( long nr )
+{
+    return nr >= 0 && (size_t)nr < NSYS && linux_syscall_names[nr] ? linux_syscall_names[nr] : "?";
+}
+
 static int strace = -1;
 
 static long fail( int e ) { errno = e; return -1; }
+
+// INVERSA_T0 is set by the first inversa in the exec chain, so every stage is timed from there
+void inv_time_mark( const char *what )
+{
+    static int on = -1;
+    static double t0;
+    if (on < 0)
+    {
+        const char *start = getenv( "INVERSA_T0" );
+        on = getenv( "INVERSA_TIME" ) && start;
+        if (on) t0 = atof( start );
+    }
+    if (!on) return;
+    struct timespec t;
+    clock_gettime( CLOCK_MONOTONIC, &t );
+    fprintf( stderr, "inversa: %7.1f ms  %s\n", t.tv_sec * 1e3 + t.tv_nsec / 1e6 - t0, what );
+}
 
 // FEX creates CLONE_THREAD workers through its ThreadManager. Its ForkGuest path
 // reaches this syscall with SIGCHLD, optionally CLONE_FS/CLONE_FILES, and no
@@ -120,24 +137,21 @@ static long sys_accept4( long fd, long addr, long addrlen, long flags )
 /* ---- forwarded by name ----------------------------------------------------- */
 // raw syscall -> the libc function with the same meaning and argument order
 static const struct { const char *sys, *fn; } same[] = {
-    { "read", 0 }, { "write", 0 }, { "close", 0 }, { "openat", 0 }, { "lseek", 0 }, { "readv", 0 },
-    { "writev", 0 }, { "pread64", "pread" }, { "pwrite64", "pwrite" }, { "dup", 0 }, { "dup3", 0 },
-    { "pipe2", 0 }, { "fcntl", 0 }, { "ioctl", 0 }, { "mmap", 0 }, { "munmap", 0 }, { "mprotect", 0 },
-    { "madvise", 0 }, { "msync", 0 }, { "mlock", 0 }, { "mkdirat", 0 }, { "unlinkat", 0 },
-    { "renameat", 0 }, { "symlinkat", 0 }, { "linkat", 0 }, { "readlinkat", 0 }, { "faccessat", 0 },
-    { "fchmodat", 0 }, { "fchownat", 0 }, { "fchmod", 0 }, { "fchown", 0 }, { "fsync", 0 },
-    { "fdatasync", 0 }, { "ftruncate", 0 }, { "truncate", 0 }, { "chdir", 0 }, { "fchdir", 0 },
-    { "nanosleep", 0 }, { "clock_gettime", 0 }, { "clock_getres", 0 }, { "clock_nanosleep", 0 },
+    { "read", 0 }, { "write", 0 }, { "close", 0 }, { "lseek", 0 }, { "readv", 0 }, { "writev", 0 },
+    { "pread64", "pread" }, { "pwrite64", "pwrite" }, { "dup", 0 }, { "dup3", 0 }, { "pipe2", 0 },
+    { "fcntl", 0 }, { "mmap", 0 }, { "munmap", 0 }, { "mprotect", 0 }, { "madvise", 0 }, { "msync", 0 },
+    { "mlock", 0 }, { "mkdirat", 0 }, { "unlinkat", 0 }, { "renameat", 0 }, { "symlinkat", 0 },
+    { "readlinkat", 0 }, { "faccessat", 0 }, { "fchmodat", 0 }, { "fchownat", 0 }, { "fchmod", 0 },
+    { "fchown", 0 }, { "fsync", 0 }, { "fdatasync", 0 }, { "ftruncate", 0 }, { "truncate", 0 },
+    { "chdir", 0 }, { "fchdir", 0 }, { "nanosleep", 0 }, { "clock_gettime", 0 }, { "clock_getres", 0 },
     { "gettimeofday", 0 }, { "getpid", 0 }, { "getppid", 0 }, { "getuid", 0 }, { "geteuid", 0 },
     { "getgid", 0 }, { "getegid", 0 }, { "getpgid", 0 }, { "setpgid", 0 }, { "getsid", 0 },
-    { "setsid", 0 }, { "umask", 0 }, { "kill", 0 }, { "sched_yield", 0 }, { "socket", 0 },
-    { "socketpair", 0 }, { "connect", 0 }, { "bind", 0 }, { "listen", 0 }, { "accept", 0 },
-    { "accept4", 0 }, { "sendto", 0 }, { "recvfrom", 0 }, { "sendmsg", 0 }, { "recvmsg", 0 },
-    { "shutdown", 0 }, { "setsockopt", 0 }, { "getsockopt", 0 }, { "getsockname", 0 },
-    { "getpeername", 0 }, { "wait4", 0 }, { "getrusage", 0 }, { "newfstatat", "fstatat" },
-    { "fstat", 0 }, { "ppoll", 0 }, { "pselect6", "pselect" }, { "eventfd2", "eventfd" },
-    { "utimensat", 0 }, { "fstatfs", 0 }, { "statfs", 0 }, { "fallocate", 0 }, { "flock", 0 },
-    { "getxattr", 0 }, { "lgetxattr", 0 }, { "fgetxattr", 0 }, { "listxattr", 0 },
+    { "setsid", 0 }, { "umask", 0 }, { "sched_yield", 0 }, { "socketpair", 0 }, { "connect", 0 },
+    { "bind", 0 }, { "listen", 0 }, { "accept", 0 }, { "sendto", 0 }, { "recvfrom", 0 },
+    { "sendmsg", 0 }, { "recvmsg", 0 }, { "shutdown", 0 }, { "setsockopt", 0 }, { "getsockopt", 0 },
+    { "getsockname", 0 }, { "getpeername", 0 }, { "getrusage", 0 }, { "ppoll", 0 },
+    { "eventfd2", "eventfd" }, { "utimensat", 0 }, { "fstatfs", 0 }, { "statfs", 0 }, { "fallocate", 0 },
+    { "flock", 0 }, { "getxattr", 0 }, { "lgetxattr", 0 }, { "fgetxattr", 0 }, { "listxattr", 0 },
     { "setuid", 0 }, { "setgid", 0 }, { "setreuid", 0 }, { "setregid", 0 }, { "getgroups", 0 },
     { "sched_getscheduler", 0 }, { "sched_getparam", 0 }, { "sched_setparam", 0 },
     { "getpriority", 0 }, { "setpriority", 0 }, { "times", 0 }, { "mincore", 0 },
@@ -478,66 +492,69 @@ static long sys_mremap( long old, long oldsz, long newsz, long flags, long newad
 }
 
 /* ---- dispatch ------------------------------------------------------------------ */
+static long sys_openat( long dirfd, long path, long flags, long mode )
+{
+    // the glibc layer's openat translates the flags but takes Darwin's AT_FDCWD (-2, not -100)
+    typedef int (*openat_fn)( int, const char *, int, int );
+    openat_fn fn = (openat_fn)libc_fn( "openat" );
+    if (!fn) return fail( ENOSYS );
+    return fn( (int)dirfd == -100 ? AT_FDCWD : (int)dirfd, (const char *)path, (int)flags, (int)mode );
+}
+
+static long sys_wait4( long pid, long status, long options, long rusage )
+{
+    // Linux WCONTINUED is 8, Darwin's 16; the status word and struct rusage match on arm64
+    if (options & ~11L) return fail( EINVAL );
+    int o = (int)(options & 3) | ((options & 8) ? WCONTINUED : 0);
+    return wait4( (pid_t)pid, (int *)status, o, (struct rusage *)rusage );
+}
+
 static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
 {
     switch (nr)
     {
-    case 17: return getcwd( (char *)a, (size_t)b ) ? (long)strlen( (char *)a ) + 1 : -1;
-    case 56: {
-        // Linux AT_FDCWD is -100; Darwin's is -2. The host openat shim
-        // translates flags but expects Darwin's directory descriptor.
-        typedef int (*openat_fn)( int, const char *, int, int );
-        openat_fn fn = (openat_fn)libc_fn( "openat" );
-        return fn ? fn( (int)a == -100 ? AT_FDCWD : (int)a, (const char *)b, (int)c, (int)d ) : fail( ENOSYS );
-    }
-    case 29: return inv_ioctl( a, b, c );
-    case 223: return 0;                                            // fadvise64: advice only
-    case 221: return inv_execveat( -100, (const char *)a, (char *const *)b, (char *const *)c, 0 );
-    case 281: return inv_execveat( a, (const char *)b, (char *const *)c, (char *const *)d, e );
-    case 37: return sys_linkat( a, b, c, d, e );
-    case 61: return sys_getdents64( a, b, c );
-    case 72: return sys_pselect6( a, b, c, d, e, f );
-    case 93: inv_thread_exit( (int)a );
-    case 94:
-        if (getenv( "INVERSA_TIME" ) && getenv( "INVERSA_T0" ))
-        {
-            struct timespec t; clock_gettime( CLOCK_MONOTONIC, &t );
-            fprintf( stderr, "inversa: %7.1f ms  exit_group\n", t.tv_sec * 1e3 + t.tv_nsec / 1e6 - atof( getenv( "INVERSA_T0" ) ) );
-        }
-        _exit( (int)a );
-    case 96: return inv_gettid();                                  // set_tid_address
-    case 98: return sys_futex( a, b, c, d, e, f );
-    case 115: return sys_clock_nanosleep( a, b, c, d );
-    case 99: case 293: case 283: return fail( ENOSYS );            // set_robust_list, rseq, membarrier
-    case 129: return kill( (pid_t)a, inv_sig_to_darwin( (int)b ) );
-    case 130: case 131: return inv_tkill( nr == 131 ? c : b, nr == 131 ? b : a );   // tkill, tgkill
-    case 132: return sys_sigaltstack( a, b );
-    case 134: return sys_rt_sigaction( a, b, c, d );
-    case 135: return sys_rt_sigprocmask( a, b, c, d );
-    case 160: return sys_uname( a );
-    case 167: return sys_prctl( a, b, c, d, e );
-    case 168: if (a) *(uint32_t *)a = 0; if (b) *(uint32_t *)b = 0; return 0;   // getcpu
-    case 178: return inv_gettid();
-    case 198: return sys_socket( a, b, c );
-    case 214: return inv_arm64_mode ? inv_arm64_brk( (uintptr_t)a ) : 0;
-    case 216: return sys_mremap( a, b, c, d, e );
-    case 220: return sys_clone_process( (uint64_t)a, b, c, d, e );
-    case 242: return sys_accept4( a, b, c, d );
-    case 260: {
-        // Linux WCONTINUED is 8; Darwin's is 16. The wait status and rusage
-        // layouts otherwise match on ARM64.
-        if (c & ~11L) return fail( EINVAL );
-        int options = (int)(c & 3) | ((c & 8) ? WCONTINUED : 0);
-        return wait4( (pid_t)a, (int *)b, options, (struct rusage *)d );
-    }
-    case 122: case 123: return nr == 123 ? sys_sched_getaffinity( a, b, c ) : 0;
-    case 261: return sys_prlimit64( a, b, c, d );
-    case 278: arc4random_buf( (void *)a, (size_t)b ); return b;    // getrandom
-    case 291: return sys_statx( a, b, c, d, e );
-    case 79: return inv_fstatat( a, (const char *)b, (void *)c, d );
-    case 80: return inv_fstat( a, (void *)b );
-    case 437: return inv_openat2( a, (const char *)b, (const uint64_t *)c, (size_t)d );
-    case 435: return sys_clone3_process( (const uint64_t *)a, (size_t)b );
+    case NR_getcwd: return getcwd( (char *)a, (size_t)b ) ? (long)strlen( (char *)a ) + 1 : -1;
+    case NR_ioctl: return inv_ioctl( a, b, c );
+    case NR_linkat: return sys_linkat( a, b, c, d, e );
+    case NR_openat: return sys_openat( a, b, c, d );
+    case NR_getdents64: return sys_getdents64( a, b, c );
+    case NR_pselect6: return sys_pselect6( a, b, c, d, e, f );
+    case NR_newfstatat: return inv_fstatat( a, (const char *)b, (void *)c, d );
+    case NR_fstat: return inv_fstat( a, (void *)b );
+    case NR_exit: inv_thread_exit( (int)a );
+    case NR_exit_group: inv_time_mark( "exit_group" ); _exit( (int)a );
+    case NR_set_tid_address: return inv_gettid();
+    case NR_futex: return sys_futex( a, b, c, d, e, f );
+    case NR_set_robust_list: return fail( ENOSYS );
+    case NR_clock_nanosleep: return sys_clock_nanosleep( a, b, c, d );
+    case NR_sched_setaffinity: return 0;
+    case NR_sched_getaffinity: return sys_sched_getaffinity( a, b, c );
+    case NR_kill: return kill( (pid_t)a, inv_sig_to_darwin( (int)b ) );
+    case NR_tkill: return inv_tkill( a, b );
+    case NR_tgkill: return inv_tkill( b, c );
+    case NR_sigaltstack: return sys_sigaltstack( a, b );
+    case NR_rt_sigaction: return sys_rt_sigaction( a, b, c, d );
+    case NR_rt_sigprocmask: return sys_rt_sigprocmask( a, b, c, d );
+    case NR_uname: return sys_uname( a );
+    case NR_prctl: return sys_prctl( a, b, c, d, e );
+    case NR_getcpu: if (a) *(uint32_t *)a = 0; if (b) *(uint32_t *)b = 0; return 0;
+    case NR_gettid: return inv_gettid();
+    case NR_socket: return sys_socket( a, b, c );
+    case NR_brk: return inv_arm64_mode ? inv_arm64_brk( (uintptr_t)a ) : 0;   // FEX keeps the guest's break itself
+    case NR_mremap: return sys_mremap( a, b, c, d, e );
+    case NR_clone: return sys_clone_process( (uint64_t)a, b, c, d, e );
+    case NR_execve: return inv_execveat( -100, (const char *)a, (char *const *)b, (char *const *)c, 0 );
+    case NR_fadvise64: return 0;
+    case NR_accept4: return sys_accept4( a, b, c, d );
+    case NR_wait4: return sys_wait4( a, b, c, d );
+    case NR_prlimit64: return sys_prlimit64( a, b, c, d );
+    case NR_getrandom: arc4random_buf( (void *)a, (size_t)b ); return b;
+    case NR_membarrier: return fail( ENOSYS );
+    case NR_execveat: return inv_execveat( a, (const char *)b, (char *const *)c, (char *const *)d, e );
+    case NR_statx: return sys_statx( a, b, c, d, e );
+    case NR_rseq: return fail( ENOSYS );
+    case NR_clone3: return sys_clone3_process( (const uint64_t *)a, (size_t)b );
+    case NR_openat2: return inv_openat2( a, (const char *)b, (const uint64_t *)c, (size_t)d );
     }
     sysfn fn = nr >= 0 && (size_t)nr < NSYS ? forwarded( nr ) : NULL;
     if (fn)
@@ -549,10 +566,23 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     if (nr >= 0 && nr < 1024 && !warned[nr])
     {
         warned[nr] = 1;
-        fprintf( stderr, "inversa: syscall %ld (%s) not implemented\n", nr,
-                 (size_t)nr < NSYS && linux_syscall_names[nr] ? linux_syscall_names[nr] : "?" );
+        fprintf( stderr, "inversa: syscall %ld (%s) not implemented\n", nr, syscall_name( nr ) );
     }
     return fail( ENOSYS );
+}
+
+// which argument is a path name: 1 for most (after a directory fd), 0 for a few, -1 for none
+static int path_arg( long nr )
+{
+    switch (nr)
+    {
+    case NR_openat: case NR_newfstatat: case NR_readlinkat: case NR_faccessat: case NR_faccessat2:
+    case NR_statx: case NR_unlinkat: case NR_mkdirat: case NR_openat2: case NR_execveat:
+        return 1;
+    case NR_chdir: case NR_execve:
+        return 0;
+    }
+    return -1;
 }
 
 // INVERSA_STRACE=names: which forwarded calls have no libc function behind them
@@ -565,30 +595,26 @@ static void check_names(void)
 
 long inv_syscall( long nr, long a, long b, long c, long d, long e, long f )
 {
-    static int checked;
-    if (!checked && (checked = 1) && getenv( "INVERSA_STRACE" ) && !strcmp( getenv( "INVERSA_STRACE" ), "names" )) check_names();
-    if (strace < 0) strace = getenv( "INVERSA_STRACE" ) && *getenv( "INVERSA_STRACE" ) != '0';
-    char rooted[4096];
-    if (inv_arm64_mode)
+    if (strace < 0)
     {
-        // Most path syscalls put the pathname after a directory fd.
-        if (nr == 56 || nr == 79 || nr == 78 || nr == 48 || nr == 437 || nr == 291 || nr == 35 || nr == 34)
-            b = (long)inv_guest_path( (const char *)b, rooted );
-        else if (nr == 49 || nr == 221)
-            a = (long)inv_guest_path( (const char *)a, rooted );
+        const char *opt = getenv( "INVERSA_STRACE" );
+        strace = opt && *opt != '0';
+        if (opt && !strcmp( opt, "names" )) check_names();
     }
-    long r = dispatch( nr, a, b, c, d, e, f );
+    long args[6] = { a, b, c, d, e, f };
+    int p = path_arg( nr );
+    char rooted[4096];
+    if (inv_arm64_mode && p >= 0) args[p] = (long)inv_guest_path( (const char *)args[p], rooted );
+    long r = dispatch( nr, args[0], args[1], args[2], args[3], args[4], args[5] );
     if (strace)
     {
-        int e = errno;
-        const char *name = nr >= 0 && (size_t)nr < NSYS && linux_syscall_names[nr] ? linux_syscall_names[nr] : "?";
-        // the *at calls: show the path
-        int path = nr == 437 || nr == 56 || nr == 79 || nr == 78 || nr == 48 || nr == 439 || nr == 291 || nr == 35 || nr == 34;
-        if (path) fprintf( stderr, "[inv] %s(%d, \"%s\", %#lx, %#lx) = %ld", name, (int)a, (const char *)b, c, d, r );
-        else fprintf( stderr, "[inv] %s(%#lx, %#lx, %#lx, %#lx) = %ld", name, a, b, c, d, r );
-        if (r == -1) fprintf( stderr, " (%s)", strerror( e ) );
+        int err = errno;
+        if (p == 1) fprintf( stderr, "[inv] %s(%d, \"%s\", %#lx, %#lx) = %ld", syscall_name( nr ), (int)args[0], (const char *)args[1], args[2], args[3], r );
+        else if (p == 0) fprintf( stderr, "[inv] %s(\"%s\", %#lx, %#lx) = %ld", syscall_name( nr ), (const char *)args[0], args[1], args[2], r );
+        else fprintf( stderr, "[inv] %s(%#lx, %#lx, %#lx, %#lx) = %ld", syscall_name( nr ), args[0], args[1], args[2], args[3], r );
+        if (r == -1) fprintf( stderr, " (%s)", strerror( err ) );
         fputc( '\n', stderr );
-        errno = e;
+        errno = err;
     }
     return r;
 }
