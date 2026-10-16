@@ -3,7 +3,7 @@
 // svc), so every guest x86-64 syscall FEX passes through, and FEX's own, lands here.
 //
 // Calls whose raw form means the same as the glibc function go to that function as the
-// guest's libc serves it (Klepton/mvr-native shims already speak the Linux ABI: flags,
+// guest's libc serves it (Klepton's and loader/glibc's shims already speak the Linux ABI: flags,
 // struct layouts, errno). The rest is written out below. Errors follow glibc: -1 with errno
 // set (Darwin's; the guest's errno location translates it).
 #include "kernel.h"

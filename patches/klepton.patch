@@ -1,5 +1,5 @@
 diff --git a/runtime/gfx/kl_vulkan.c b/runtime/gfx/kl_vulkan.c
-index 73854cc..7f7d4cb 100644
+index 73854cc..95bd3da 100644
 --- a/runtime/gfx/kl_vulkan.c
 +++ b/runtime/gfx/kl_vulkan.c
 @@ -340,6 +340,23 @@ static klvk_device *dev_find(VkDevice d) {
@@ -125,7 +125,7 @@ index 73854cc..7f7d4cb 100644
 +static void and_bools(VkBool32 *want, const VkBool32 *have, size_t n, const char *what) {
 +    for (size_t i = 0; i < n; i++)
 +        if (want[i] && !have[i]) {
-+            VKI("device feature %s[%zu] not supported by MoltenVK — cleared\n", what, i);
++            VKI("device feature %s[%zu] not supported by MoltenVK, cleared\n", what, i);
 +            want[i] = VK_FALSE;
 +        }
 +}

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Run cpubench under every translator and compare.  bench/run.py [rounds]
-Builds come from build/bench (see the commands in the README of this directory's parent)."""
+The binaries come from build/bench (see the README). The Wine rows need ARM64_WINE (an arm64
+Wine with FEX for x86-64) and ROSETTA_WINE (an x86-64 Wine); rows whose Wine is missing are skipped."""
 import json, os, statistics, subprocess, sys, time
-HOME = os.path.expanduser("~")
-B = os.path.join(HOME, "inversa/build/bench")
-INV = os.path.join(HOME, "inversa/build/Inversa.app/Contents/MacOS/inversa")
-AW = os.path.join(HOME, "wine-arm64/Wine.app/Contents/MacOS/wine")
-RW = os.path.join(HOME, "Library/Application Support/MoltenVR/wine/Libraries/Wine/bin/wine")
-APFX, RPFX = os.path.join(HOME, "wine-arm64/pfx"), os.path.join(B, "pfx-rosetta")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+B = os.path.join(ROOT, "build/bench")
+INV = os.path.join(ROOT, "build/Inversa.app/Contents/MacOS/inversa")
+AW = os.environ.get("ARM64_WINE", "")
+RW = os.environ.get("ROSETTA_WINE", "")
+APFX = os.environ.get("ARM64_WINEPREFIX", os.path.join(B, "pfx-arm64"))
+RPFX = os.environ.get("ROSETTA_WINEPREFIX", os.path.join(B, "pfx-rosetta"))
 CONFIGS = [  # name, argv prefix, binary, env
     ("macOS arm64 (native)",          [], "mac-arm64", {}),
     ("macOS x86-64 (Rosetta 2)",      ["arch", "-x86_64"], "mac-x64", {}),
@@ -17,6 +19,7 @@ CONFIGS = [  # name, argv prefix, binary, env
     ("Windows x64 (arm64 Wine+FEX)",  [AW], "win-x64.exe", {"WINEPREFIX": APFX}),
     ("Windows x64 (Rosetta Wine)",    [RW], "win-x64.exe", {"WINEPREFIX": RPFX}),
 ]
+CONFIGS = [c for c in CONFIGS if not c[1] or c[1][0] == "arch" or os.path.exists(c[1][0])]
 TESTS = ["sha256", "nbody", "memcpy", "qsort", "oscall"]
 
 def run(cfg, args):
@@ -38,7 +41,11 @@ for r in range(rounds):
         print("round %d: %-31s %s" % (r + 1, cfg[0], " ".join("%s=%.3f" % (k, best[cfg[0]].get(k, -1)) for k in TESTS)), flush=True)
 # startup: warm wineservers first so it's program start, not Wine booting
 for pfx, w in ((APFX, AW), (RPFX, RW)):
-    subprocess.Popen([os.path.join(os.path.dirname(w), "wineserver") if w == RW else os.path.join(os.path.dirname(AW), "../Resources/bin/wineserver"), "-p"],
+    if not w: continue
+    server = os.path.join(os.path.dirname(w), "wineserver")
+    if not os.path.exists(server): server = os.path.join(os.path.dirname(w), "../Resources/bin/wineserver")   # Wine.app
+    if not os.path.exists(server): continue
+    subprocess.Popen([server, "-p"],
                      env=dict(os.environ, WINEPREFIX=pfx), start_new_session=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(3)

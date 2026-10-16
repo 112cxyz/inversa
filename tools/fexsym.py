@@ -2,7 +2,7 @@
 """Offsets in libFEXInversa.so -> function+offset.  fexsym.py <offset>..."""
 import bisect, os, re, subprocess, sys
 lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "lib", "libFEXInversa.so")
-nm = os.path.expanduser("~/wine-arm64/tc/llvm-mingw-20260922-ucrt-macos-universal/bin/llvm-nm")
+nm = os.environ.get("LLVM_NM") or subprocess.run(["brew", "--prefix", "llvm"], capture_output=True, text=True).stdout.strip() + "/bin/llvm-nm"
 syms = []
 for l in subprocess.run([nm, "-C", "--defined-only", lib], capture_output=True, text=True).stdout.splitlines():
     p = l.split(" ", 2)

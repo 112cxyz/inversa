@@ -65,7 +65,7 @@ static long enosys(void) { return set_errno( ENOSYS ); }
 static void *enosys_null(void) { errno = ENOSYS; return NULL; }
 static long zero(void) { return 0; }
 
-/* ---- /proc/self/exe is the game, not mvr-native ------------------------------ */
+/* ---- /proc/self/exe is the guest program, not inversa -------------------------- */
 static char exe_path[1024];
 const char *mvr_glibc_exe_path(void) { return exe_path; }
 void mvr_glibc_set_exe( const char *path ) { if (!realpath( path, exe_path )) snprintf( exe_path, sizeof exe_path, "%s", path ); }

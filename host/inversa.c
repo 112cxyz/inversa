@@ -1,5 +1,5 @@
-// inversa: run Linux programs on macOS. ARM64 ones natively (Klepton + the mvr-native glibc
-// layer), x86-64 ones through FEX built for that same layer, over Inversa's Linux kernel.
+// inversa: run Linux programs on macOS. ARM64 ones natively (Klepton + the glibc layer in
+// loader/), x86-64 ones through FEX built for that same layer, over Inversa's Linux kernel.
 //   inversa run <program> [args...]
 //   inversa probe <program>          load it and list what doesn't resolve
 #include "../kernel/kernel.h"
@@ -90,7 +90,7 @@ static void ensure_4k_pages( char **argv )
     fprintf( stderr, "inversa: 4K page re-exec failed; still using %dK pages\n", getpagesize() / 1024 );
 }
 
-// Vulkan: KosmicKrisp through the Vulkan loader (see mvr-native); INVERSA_VULKAN_DRIVER=moltenvk opts out
+// Vulkan: KosmicKrisp through the Vulkan loader when Homebrew has both; INVERSA_VULKAN_DRIVER=moltenvk opts out
 static void vulkan_env(void)
 {
     const char *driver = getenv( "INVERSA_VULKAN_DRIVER" );
@@ -110,7 +110,7 @@ static const char *guest_env( int machine, const char *prog, const char *dir )
 {
     static char fex[1200];
     char path[1300];
-    setenv( "KL_X18", "0", 0 );   // linked for macOS 11 so XNU keeps x18 (see mvr-native)
+    setenv( "KL_X18", "0", 0 );   // guest code uses x18; see the macOS 11 link in the Makefile
     vulkan_env();
     if (!getenv( "MVR_LIBPATH" ))
     {
