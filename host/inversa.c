@@ -149,7 +149,7 @@ int main( int argc, char **argv )
         if (!_NSGetExecutablePath( exe, &n )) posix_spawn( NULL, exe, NULL, &attr, argv, environ );
         fprintf( stderr, "inversa: 4K page re-exec failed; still using %dK pages\n", getpagesize() / 1024 );
     }
-    if (machine == EM_X86_64 && getpagesize() != 0x1000)
+    if (machine == EM_X86_64 && !probe && getpagesize() != 0x1000)   /* probing runs no guest code */
     {
         fprintf( stderr, "inversa: x86-64 requires 4K pages and the cross-architecture entitlement (current page size: %dK)\n",
                  getpagesize() / 1024 );

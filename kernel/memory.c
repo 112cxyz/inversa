@@ -22,6 +22,7 @@ void *mvr_glibc_ext_lookup( const char *name );
 int mvr_jit_mprotect( void *addr, size_t len, int prot );
 int mvr_jit_contains( void *addr );
 void mvr_jit_unmap( void *addr, size_t len );
+void mvr_jit_register( void *addr, size_t len );
 
 int inv_x86_mode;
 extern int inv_arm64_mode;
@@ -80,13 +81,11 @@ static void *map( void *addr, size_t len, long prot, long flags, long fd, long o
     if (!(flags & L_ANON) || (inv_x86_mode && !(prot & PROT_EXEC)))
         return base_mmap( addr, len, (flags & L_ANON) ? prot : prot & ~PROT_EXEC, flags, fd, off );
     if (!(prot & PROT_EXEC)) return base_mmap( addr, len, prot, flags, fd, off );
-    void *p = base_mmap( addr, len, prot & ~PROT_EXEC, flags, fd, off );
-    if (p != MAP_FAILED && mvr_jit_mprotect( p, len, (int)prot ))
-    {
-        munmap( p, len );
-        errno = ENOMEM;
-        return MAP_FAILED;
-    }
+    // fresh anonymous code memory (FEX's code buffers): MAP_JIT from the start. Converting a
+    // read-write mapping instead copies it out and back, every page of a 16 MB buffer.
+    void *p = mmap( addr, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+                    MAP_PRIVATE | MAP_ANON | MAP_JIT | ((flags & L_FIXED) ? MAP_FIXED : 0), -1, 0 );
+    if (p != MAP_FAILED) mvr_jit_register( p, len );
     return p;
 }
 
