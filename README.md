@@ -96,6 +96,10 @@ One known bug: a second `fork` that runs bash code without an `exec` hangs on it
 
 `tools/fexsym.py <offset>...` turns offsets in `libFEXInversa.so` into FEX function names (it uses Homebrew's `llvm-nm`, or `LLVM_NM`).
 
+## Licence
+
+Copyright (C) 2026 Toby Fox. Inversa is free software under the GNU General Public License, version 3; see [LICENSE](LICENSE).
+
 ## Credits
 
 [FEX](https://github.com/FEX-Emu/FEX) and [Klepton](https://github.com/shinyquagsire23/Klepton) are both MIT licensed. The guest roots and sysroots are unpacked from Debian packages, each under its own licence.
