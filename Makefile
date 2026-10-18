@@ -89,17 +89,44 @@ $(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.
 	sed 's/@ID@/$(BUNDLE_ID)/' host/Info.plist > $@/Contents/Info.plist
 	if [ -n "$(SIGN_ID)" ] && [ -f "$(PROFILE)" ]; then \
 	  cp "$(PROFILE)" $@/Contents/embedded.provisionprofile; \
-	  codesign -f -s "$(SIGN_ID)" -i $(BUNDLE_ID) --entitlements host/entitlements.plist $@/Contents/MacOS/inversa-core; \
-	  codesign -f -s "$(SIGN_ID)" --entitlements host/entitlements.plist $@; \
+	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp -i $(BUNDLE_ID) --entitlements host/entitlements.plist $@/Contents/MacOS/inversa-core; \
+	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp --entitlements host/entitlements.plist $@; \
 	else \
 	  echo "note: no Developer ID + provisioning profile: signing ad hoc (16K pages, no low memory)"; \
 	  codesign -f -s - $@/Contents/MacOS/inversa-core; \
 	  codesign -f -s - $@; \
 	fi
 
+# OpenComposite: the game's OpenVR calls turned into OpenXR for MoltenVR's runtime. Its own
+# sysroot, with the Vulkan and GL headers it builds against
+VRSYSROOT := $(BUILD)/sysroot-vr
+$(VRSYSROOT)/usr/include/vulkan/vulkan.h:
+	python3 tools/fetch_rootfs.py arm64 $(VRSYSROOT) libc6-dev libstdc++-14-dev libgcc-14-dev linux-libc-dev \
+	  libvulkan-dev libgl-dev libglx-dev libopengl-dev libegl-dev libgles-dev libglvnd-dev
+
+$(BUILD)/opencomposite/build.ninja: $(VRSYSROOT)/usr/include/vulkan/vulkan.h
+	cmake -S $(OPENOVR) -B $(BUILD)/opencomposite -G Ninja -DCMAKE_TOOLCHAIN_FILE=$(CURDIR)/tools/aarch64-linux.cmake \
+	  -DCMAKE_SYSROOT=$(VRSYSROOT) -DCMAKE_BUILD_TYPE=Release
+
+opencomposite: $(BUILD)/opencomposite/build.ninja
+	ninja -C $(BUILD)/opencomposite
+	@mkdir -p $(BUILD)/openvr/bin/linuxarm64
+	cp $(BUILD)/opencomposite/bin/linux64/vrclient.so $(BUILD)/openvr/bin/linuxarm64/
+
+# Klepton fetches it, checks its sha256 and stages it in vendor-moltenvk/out/macos
+moltenvk:
+	$(MAKE) -C $(KLEPTON) mvk
+
 rootfs:
 	python3 tools/fetch_rootfs.py amd64 $(BUILD)/rootfs/x86_64 bash coreutils
 	python3 tools/fetch_rootfs.py arm64 $(BUILD)/lib/arm64-root libstdc++6 libgcc-s1
+
+# what a Steam Linux Runtime game expects but doesn't ship (ICU 67 for Alyx's V8 only exists in bullseye)
+steamrt-libs:
+	python3 tools/fetch_rootfs.py arm64 $(BUILD)/lib/arm64-root libstdc++6 libgcc-s1 libssl3t64 libpng16-16t64 \
+	  zlib1g libzstd1 libbz2-1.0 libbrotli1 libexpat1 libglib2.0-0t64 libfribidi0 libogg0 libuuid1 libpcre2-8-0 \
+	  libffi8 libmount1 libblkid1 libselinux1 libspirv-tools2025.1 libatomic1
+	python3 tools/fetch_rootfs.py --suite bullseye --nodeps arm64 $(BUILD)/lib/arm64-root libicu67
 
 LLVM ?= $(shell brew --prefix llvm 2>/dev/null)/bin
 tests: tests/build/hello_x64

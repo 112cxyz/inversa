@@ -4,4 +4,9 @@
 <key>com.apple.application-identifier</key><string>DXQ46W3K28.dev.moltenvr.xarch-probe</string>
 <key>com.apple.developer.team-identifier</key><string>DXQ46W3K28</string>
 <key>com.apple.developer.cross-architecture-support</key><true/>
+<!-- hardened runtime (needed for notarization): FEX maps its code buffers MAP_JIT, Klepton
+     loads and patches Linux code in writable memory, and Vulkan comes from Homebrew dylibs -->
+<key>com.apple.security.cs.allow-jit</key><true/>
+<key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+<key>com.apple.security.cs.disable-library-validation</key><true/>
 </dict></plist>
