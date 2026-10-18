@@ -4,8 +4,12 @@
 #   make fex       build/lib/libFEXInversa.so
 #   make           build/Inversa.app (+ fex)
 #   make rootfs    Debian guest roots: build/rootfs/x86_64, and the arm64 libraries FEX itself needs
+#   make steamrt-libs    the Debian libraries Steam Linux Runtime games expect
+#   make opencomposite   build/openvr: OpenVR on OpenXR for Linux ARM64 VR games (see docs/alyx.md)
+#   make moltenvk        the official MoltenVK release, for games that don't run on KosmicKrisp yet
 KLEPTON := third_party/Klepton
 FEX     := third_party/FEX
+OPENOVR := third_party/OpenOVR
 BUILD   := $(abspath build)
 CC      := clang
 VK_INC  ?= $(shell brew --prefix vulkan-headers 2>/dev/null)/include
@@ -29,7 +33,7 @@ KL_SRCS := $(shell $(MAKE) -s -C $(KLEPTON) -f Makefile -f $(CURDIR)/loader/prin
 KL_OBJS := $(patsubst %,$(BUILD)/klepton/%.o,$(KL_SRCS))
 FEXLIB  := $(BUILD)/fex/Source/Tools/FEXInterpreter/libFEXInversa.so
 
-.PHONY: all setup sysroot fex rootfs tests clean
+.PHONY: all setup sysroot fex rootfs steamrt-libs opencomposite moltenvk tests clean
 all: $(BUILD)/Inversa.app $(BUILD)/lib/libFEXInversa.so
 
 setup:

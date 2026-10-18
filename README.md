@@ -39,6 +39,8 @@ Guest code links against a glibc ABI built over Darwin's libc (`loader/glibc`). 
 
 After `fork` the child rebuilds Klepton's mutexes and resets its JIT state before running guest code. When a guest execs another Linux program, that becomes another `inversa run`, spawned straight into 4K pages.
 
+Half-Life: Alyx's Linux ARM64 build runs in VR through MoltenVR; see [docs/alyx.md](docs/alyx.md).
+
 There's also an experimental ARM64 loader that runs a program on its own Linux `ld.so` and glibc (`kernel/linux.c`, `INVERSA_ARM64_LINUX=1`). It wants an ARM64 root at `build/rootfs/aarch64` or `INVERSA_ROOTFS`.
 
 ## Layout
@@ -51,7 +53,7 @@ There's also an experimental ARM64 loader that runs a program on its own Linux `
 | `third_party/` | FEX and Klepton as submodules; `patches/` holds Inversa's changes to them |
 | `tests/` | `check.py`, the regression set, and a static x86-64 test program |
 | `bench/` | a CPU benchmark run natively, under Rosetta, Inversa and Wine |
-| `docs/` | the icon at 256 px for this page, copied from `build/Inversa.iconset` |
+| `docs/` | guides ([Half-Life: Alyx](docs/alyx.md)), and the icon for this page |
 | `tools/` | Debian root and sysroot fetcher, cross toolchain file, icon, FEX symboliser, `safe_run.py` |
 
 ## Testing
@@ -102,4 +104,4 @@ Copyright (C) 2026 Toby Fox. Inversa is free software under the GNU General Publ
 
 ## Credits
 
-[FEX](https://github.com/FEX-Emu/FEX) and [Klepton](https://github.com/shinyquagsire23/Klepton) are both MIT licensed. The guest roots and sysroots are unpacked from Debian packages, each under its own licence.
+[FEX](https://github.com/FEX-Emu/FEX) and [Klepton](https://github.com/shinyquagsire23/Klepton) are both MIT licensed, and [OpenComposite](https://gitlab.com/znixian/OpenOVR) is GPL-3.0. The per-eye crop for Alyx follows [VeRantyx](https://github.com/armax9/VeRantyx) (MIT). The guest roots and sysroots are unpacked from Debian packages, each under its own licence.

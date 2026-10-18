@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """A Linux root filesystem for Inversa from Debian packages and their dependencies.
-  fetch_rootfs.py <arch> <dir> <package>...      e.g. fetch_rootfs.py amd64 rootfs/x86_64 bash coreutils
-Packages are unpacked as is (no maintainer scripts); Debian's merged /usr symlinks are added."""
+  fetch_rootfs.py [--suite S] [--nodeps] <arch> <dir> <package>...
+  e.g. fetch_rootfs.py amd64 rootfs/x86_64 bash coreutils
+Packages are unpacked as is (no maintainer scripts); Debian's merged /usr symlinks are added.
+--suite takes them from another Debian release (default trixie); --nodeps unpacks only the
+packages named, for an old library dropped into a newer root."""
 import io, lzma, os, re, subprocess, sys, tarfile, urllib.request
 
-MIRROR, SUITE = "https://deb.debian.org/debian", "trixie"
-arch, out, wanted = sys.argv[1], os.path.abspath(sys.argv[2]), sys.argv[3:]
+MIRROR, SUITE, NODEPS = "https://deb.debian.org/debian", "trixie", False
+args = sys.argv[1:]
+while args and args[0].startswith("--"):
+    opt = args.pop(0)
+    if opt == "--suite": SUITE = args.pop(0)
+    elif opt == "--nodeps": NODEPS = True
+    else: raise SystemExit("unknown option " + opt)
+arch, out, wanted = args[0], os.path.abspath(args[1]), args[2:]
 dl = os.path.join(os.path.dirname(out), ".debs", arch)
 os.makedirs(dl, exist_ok=True)
 
 def index():
-    path = os.path.join(dl, "Packages.xz")
+    path = os.path.join(dl, "Packages.xz" if SUITE == "trixie" else "Packages-%s.xz" % SUITE)
     if not os.path.exists(path):
         urllib.request.urlretrieve("%s/dists/%s/main/binary-%s/Packages.xz" % (MIRROR, SUITE, arch), path)
     pkgs, provides, cur = {}, {}, {}
@@ -70,7 +79,7 @@ os.makedirs(out, exist_ok=True)
 for d in ("bin", "sbin", "lib", "lib64"):   # merged /usr
     os.makedirs(os.path.join(out, "usr", d), exist_ok=True)
     if not os.path.lexists(os.path.join(out, d)): os.symlink("usr/" + d, os.path.join(out, d))
-for n in resolve(wanted):
+for n in (wanted if NODEPS else resolve(wanted)):
     unpack(n); print(n, pkgs[n]["Version"])
 for d in ("etc", "tmp", "proc", "dev", "home", "root", "var/tmp"): os.makedirs(os.path.join(out, d), exist_ok=True)
 

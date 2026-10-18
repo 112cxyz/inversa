@@ -136,9 +136,11 @@ void *mvr_hostlib_lookup( const char *name )
     {
         if (!openxr)
         {
+            // MVR_OPENXR_RUNTIME, else the installed MoltenVR app's, else a MoltenVR source checkout's
             const char *p = getenv( "MVR_OPENXR_RUNTIME" );
-            char def[1024];
-            snprintf( def, sizeof def, "%s/MoltenVR/openxr-runtime-macos/libmoltenvr_openxr.dylib", getenv( "HOME" ) );
+            char def[1024] = "/Applications/MoltenVR.app/Contents/Resources/payload/libmoltenvr_openxr.dylib";
+            if (!p && access( def, R_OK ))
+                snprintf( def, sizeof def, "%s/MoltenVR/openxr-runtime-macos/libmoltenvr_openxr.dylib", getenv( "HOME" ) );
             openxr = dlopen( p ? p : def, RTLD_NOW | RTLD_LOCAL );
             if (!openxr) fprintf( stderr, "[mvr] OpenXR runtime: %s\n", dlerror() );
             /* Vulkan apps using XR_KHR_vulkan_enable: the runtime must reach the same

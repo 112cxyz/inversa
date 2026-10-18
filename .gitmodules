@@ -4,3 +4,7 @@
 [submodule "third_party/Klepton"]
 	path = third_party/Klepton
 	url = https://github.com/shinyquagsire23/Klepton.git
+[submodule "third_party/OpenOVR"]
+	path = third_party/OpenOVR
+	url = https://gitlab.com/armax9/OpenOVR.git
+	branch = wine-crossover-alyx

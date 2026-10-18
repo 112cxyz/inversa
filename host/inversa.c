@@ -211,6 +211,7 @@ int main( int argc, char **argv )
     inv_kernel_init();
     mvr_glibc_set_exe( load );
     mvr_deps_init( load );
+    if (getenv( "SteamAppId" )) mvr_steam_init( getenv( "SteamAppId" ) );   // a Steam game
     kl_thread_init();
     mvr_tls_thread_init();
     if (machine == EM_AARCH64 && getenv( "INVERSA_ARM64_LINUX" ))
