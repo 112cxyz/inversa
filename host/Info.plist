@@ -4,6 +4,8 @@
 <key>CFBundleIdentifier</key><string>@ID@</string>
 <key>CFBundleExecutable</key><string>inversa</string>
 <key>CFBundleName</key><string>Inversa</string>
+<key>CFBundleShortVersionString</key><string>@VERSION@</string>
+<key>CFBundleVersion</key><string>@VERSION@</string>
 <key>CFBundleIconFile</key><string>Inversa</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSBackgroundOnly</key><true/>

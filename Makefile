@@ -7,10 +7,13 @@
 #   make steamrt-libs    the Debian libraries Steam Linux Runtime games expect
 #   make opencomposite   build/openvr: OpenVR on OpenXR for Linux ARM64 VR games (see docs/alyx.md)
 #   make moltenvk        the official MoltenVK release, for games that don't run on KosmicKrisp yet
+#   make notarize        Apple's notary check on build/Inversa.app, ticket stapled
+#   make dist            build/dist/Inversa-$(VERSION).zip: the app, lib/, the x86-64 root and OpenComposite
 KLEPTON := third_party/Klepton
 FEX     := third_party/FEX
 OPENOVR := third_party/OpenOVR
 BUILD   := $(abspath build)
+VERSION := 0.1.0
 CC      := clang
 VK_INC  ?= $(shell brew --prefix vulkan-headers 2>/dev/null)/include
 INC     := -I$(KLEPTON)/runtime -I$(KLEPTON)/runtime/jni -I$(KLEPTON)/runtime/libc -I$(KLEPTON)/runtime/gfx \
@@ -28,12 +31,13 @@ SRCS    := host/inversa.c host/cpu.c kernel/kernel.c kernel/libc.c kernel/memory
 SIGN_ID ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
 PROFILE ?= $(HOME)/Downloads/Mac.provisionprofile
 BUNDLE_ID ?= dev.moltenvr.xarch-probe
+NOTARY_PROFILE ?= moltenvr
 
 KL_SRCS := $(shell $(MAKE) -s -C $(KLEPTON) -f Makefile -f $(CURDIR)/loader/print.mk print-RUNTIME 2>/dev/null)
 KL_OBJS := $(patsubst %,$(BUILD)/klepton/%.o,$(KL_SRCS))
 FEXLIB  := $(BUILD)/fex/Source/Tools/FEXInterpreter/libFEXInversa.so
 
-.PHONY: all setup sysroot fex rootfs steamrt-libs opencomposite moltenvk tests clean
+.PHONY: all setup sysroot fex rootfs steamrt-libs opencomposite moltenvk notarize dist tests clean
 all: $(BUILD)/Inversa.app $(BUILD)/lib/libFEXInversa.so
 
 setup:
@@ -86,7 +90,7 @@ $(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.
 	cp $(BUILD)/inversa-launch $@/Contents/MacOS/inversa
 	cp $(BUILD)/inversa $@/Contents/MacOS/inversa-core
 	cp $(BUILD)/Inversa.icns $@/Contents/Resources/
-	sed 's/@ID@/$(BUNDLE_ID)/' host/Info.plist > $@/Contents/Info.plist
+	sed -e 's/@ID@/$(BUNDLE_ID)/' -e 's/@VERSION@/$(VERSION)/' host/Info.plist > $@/Contents/Info.plist
 	if [ -n "$(SIGN_ID)" ] && [ -f "$(PROFILE)" ]; then \
 	  cp "$(PROFILE)" $@/Contents/embedded.provisionprofile; \
 	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp -i $(BUNDLE_ID) --entitlements host/entitlements.plist $@/Contents/MacOS/inversa-core; \
@@ -127,6 +131,28 @@ steamrt-libs:
 	  zlib1g libzstd1 libbz2-1.0 libbrotli1 libexpat1 libglib2.0-0t64 libfribidi0 libogg0 libuuid1 libpcre2-8-0 \
 	  libffi8 libmount1 libblkid1 libselinux1 libspirv-tools2025.1 libatomic1
 	python3 tools/fetch_rootfs.py --suite bullseye --nodeps arm64 $(BUILD)/lib/arm64-root libicu67
+
+notarize:
+	ditto -c -k --keepParent $(BUILD)/Inversa.app $(BUILD)/notarize.zip
+	xcrun notarytool submit $(BUILD)/notarize.zip --keychain-profile $(NOTARY_PROFILE) --wait
+	rm -f $(BUILD)/notarize.zip
+	xcrun stapler staple $(BUILD)/Inversa.app
+
+# Inversa finds lib/ beside its app and the x86-64 root at lib/../rootfs, so this folder runs from
+# anywhere. It's the release download, and what MoltenVR bundles
+DIST := $(BUILD)/dist/Inversa
+dist:
+	@test -f $(BUILD)/lib/libFEXInversa.so -a -d $(BUILD)/rootfs/x86_64/usr -a -d $(BUILD)/lib/arm64-root/usr \
+	  || { echo "dist needs make fex rootfs steamrt-libs first"; exit 1; }
+	@xcrun stapler validate -q $(BUILD)/Inversa.app || echo "warning: Inversa.app isn't notarized (make notarize)"
+	rm -rf $(BUILD)/dist && mkdir -p $(DIST)/lib $(DIST)/rootfs
+	ditto $(BUILD)/Inversa.app $(DIST)/Inversa.app
+	ditto $(BUILD)/lib/libFEXInversa.so $(DIST)/lib/libFEXInversa.so
+	ditto $(BUILD)/lib/arm64-root $(DIST)/lib/arm64-root
+	ditto $(BUILD)/rootfs/x86_64 $(DIST)/rootfs/x86_64
+	if [ -d $(BUILD)/openvr ]; then ditto $(BUILD)/openvr $(DIST)/openvr; fi
+	cd $(BUILD)/dist && ditto -c -k --keepParent Inversa Inversa-$(VERSION).zip
+	shasum -a 256 $(BUILD)/dist/Inversa-$(VERSION).zip
 
 LLVM ?= $(shell brew --prefix llvm 2>/dev/null)/bin
 tests: tests/build/hello_x64

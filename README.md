@@ -31,6 +31,17 @@ If the keychain lookup fails the build falls back to ad hoc without stopping, so
 codesign -d --entitlements - build/Inversa.app
 ```
 
+### Packaging
+
+```
+make steamrt-libs  # the libraries Steam Linux Runtime games expect, into lib/arm64-root
+make opencomposite # optional: OpenVR for Linux ARM64 VR games
+make notarize      # notarytool, with the keychain profile in NOTARY_PROFILE
+make dist          # build/dist/Inversa-<version>.zip
+```
+
+The zip holds an `Inversa` folder: `Inversa.app`, `lib/`, `rootfs/x86_64` and `openvr/`. Inversa finds `lib/` next to its app, so the folder runs from wherever it's unpacked. Releases on GitHub carry this zip, and MoltenVR either bundles it or downloads it the first time a game needs it.
+
 ## How it works
 
 `Contents/MacOS/inversa` (`host/launch.c`) is a small launcher that starts `inversa-core` in a 4K-page process in one spawn. The core (`host/inversa.c`) looks at the ELF machine type. For an ARM64 program, Klepton loads the program itself. For x86-64, Klepton loads `libFEXInversa.so` instead and FEX is told the CPU's features (`host/cpu.c`) and where the x86-64 root is.
