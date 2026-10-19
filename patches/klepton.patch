@@ -574,6 +574,47 @@ index 23bbbcc..80ff03c 100644
  // Read a file's DT_NEEDED sonames without loading it (kl_image.c).
  int       kl_list_needed(const char *path, char names[][128], int max);
  // Search every registered guest image for an export (kl_dl.c); used by the
+diff --git a/runtime/libc/kl_libc.c b/runtime/libc/kl_libc.c
+index 060df05..cebacf9 100644
+--- a/runtime/libc/kl_libc.c
++++ b/runtime/libc/kl_libc.c
+@@ -1266,7 +1266,8 @@ static void proc_build(void) {
+             "CPU variant\t: 0xd\n"
+             "CPU part\t: 0x805\n"
+             "CPU revision\t: 14\n\n", i);
+-    sprintf(cpuinfo + at, "Hardware\t: Qualcomm Technologies, Inc SDM865\n");
++    // KL_CPU_HARDWARE: a host that isn't posing as a headset (Inversa) names the real chip
++    sprintf(cpuinfo + at, "Hardware\t: %s\n", kl_env_str("KL_CPU_HARDWARE", "Qualcomm Technologies, Inc SDM865"));
+     proc_put("/proc/cpuinfo", cpuinfo);
+     free(cpuinfo);
+ 
+@@ -1299,19 +1300,23 @@ static void proc_build(void) {
+     // and it looped on those instead. cpufreq nodes exist for every POSSIBLE core
+     // on real hardware anyway, so a slot per possible core is faithful; the online
+     // count that sizes thread pools stays `ncpu` via /possible + /proc/cpuinfo.
++    // KL_CPU_MAX_KHZ overrides the top of the range: engines grade the CPU on it (Source 2's
++    // cpu_level), and a desktop game on a Mac shouldn't be told it runs on a phone
++    char maxkhz[32];
++    snprintf(maxkhz, sizeof maxkhz, "%ld\n", (long)kl_env_int("KL_CPU_MAX_KHZ", 2840000));
+     long nfreq = ncpu < 16 ? 16 : ncpu;
+     for (long i = 0; i < nfreq; i++) {
+         char rel[256];
+         snprintf(rel, sizeof rel, "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq", i);
+-        proc_put(rel, "2840000\n");
++        proc_put(rel, maxkhz);
+         snprintf(rel, sizeof rel, "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_min_freq", i);
+         proc_put(rel, "300000\n");
+         snprintf(rel, sizeof rel, "/sys/devices/system/cpu/cpu%ld/cpufreq/scaling_max_freq", i);
+-        proc_put(rel, "2840000\n");
++        proc_put(rel, maxkhz);
+         snprintf(rel, sizeof rel, "/sys/devices/system/cpu/cpu%ld/cpufreq/scaling_min_freq", i);
+         proc_put(rel, "300000\n");
+         snprintf(rel, sizeof rel, "/sys/devices/system/cpu/cpu%ld/cpufreq/scaling_cur_freq", i);
+-        proc_put(rel, "2840000\n");
++        proc_put(rel, maxkhz);
+         snprintf(rel, sizeof rel, "/sys/devices/system/cpu/cpu%ld/cpu_capacity", i);
+         proc_put(rel, "1024\n");
+     }
 diff --git a/runtime/libc/kl_pthread.c b/runtime/libc/kl_pthread.c
 index aef7e05..60f430f 100644
 --- a/runtime/libc/kl_pthread.c

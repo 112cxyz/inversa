@@ -13,7 +13,7 @@ KLEPTON := third_party/Klepton
 FEX     := third_party/FEX
 OPENOVR := third_party/OpenOVR
 BUILD   := $(abspath build)
-VERSION := 0.1.0
+VERSION := 0.1.1
 CC      := clang
 VK_INC  ?= $(shell brew --prefix vulkan-headers 2>/dev/null)/include
 INC     := -I$(KLEPTON)/runtime -I$(KLEPTON)/runtime/jni -I$(KLEPTON)/runtime/libc -I$(KLEPTON)/runtime/gfx \
@@ -85,7 +85,7 @@ $(BUILD)/Inversa.icns: tools/make_icon.swift
 	iconutil -c icns -o $@ $(BUILD)/Inversa.iconset
 
 # both executables carry the entitlement: the launcher to ask for 4K pages, the core to run in them
-$(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.icns host/Info.plist host/entitlements.plist
+$(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.icns host/Info.plist host/entitlements.plist Makefile
 	rm -rf $@ && mkdir -p $@/Contents/MacOS $@/Contents/Resources
 	cp $(BUILD)/inversa-launch $@/Contents/MacOS/inversa
 	cp $(BUILD)/inversa $@/Contents/MacOS/inversa-core

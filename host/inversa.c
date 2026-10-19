@@ -22,6 +22,7 @@
 extern char **environ;
 extern void mvr_enter( void *entry, void *sp ) __attribute__((noreturn));
 void inv_cpu_feature_registers( char *out, size_t cap );
+void inv_machine_env( void );
 void mvr_crash_init(void);
 
 enum { EM_AARCH64 = 183, EM_X86_64 = 62 };
@@ -111,6 +112,7 @@ static const char *guest_env( int machine, const char *prog, const char *dir )
     static char fex[1200];
     char path[1300];
     setenv( "KL_X18", "0", 0 );   // guest code uses x18; see the macOS 11 link in the Makefile
+    inv_machine_env();
     vulkan_env();
     if (!getenv( "MVR_LIBPATH" ))
     {

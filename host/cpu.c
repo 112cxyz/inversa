@@ -2,6 +2,8 @@
 // hw.optional.arm.FEAT_* (Darwin traps the mrs itself). Field layouts from the Arm ARM.
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/sysctl.h>
 
 static int feat( const char *name )
@@ -54,4 +56,33 @@ void inv_cpu_feature_registers( char *out, size_t cap )
               (unsigned long long)isar0, (unsigned long long)isar1, (unsigned long long)isar2,
               (unsigned long long)pfr0, (unsigned long long)pfr1, (unsigned long long)mmfr1,
               (unsigned long long)mmfr2, (unsigned long long)dczid );
+}
+
+// What the guest's /proc and /sys say about the machine (Klepton's defaults describe a Quest):
+// the chip's name, its peak clock, which macOS doesn't report so it comes from Apple's figures
+// per generation, and the real memory. Engines grade the hardware on these.
+void inv_machine_env( void )
+{
+    static const struct { const char *chip; int khz; } clocks[] = {
+        { "Apple M1", 3200000 }, { "Apple M2", 3500000 }, { "Apple M3", 4050000 },
+        { "Apple M4", 4400000 }, { "Apple M5", 4600000 },
+    };
+    char brand[128] = "", v[32];
+    size_t n = sizeof brand;
+    if (!sysctlbyname( "machdep.cpu.brand_string", brand, &n, NULL, 0 ))
+    {
+        setenv( "KL_CPU_HARDWARE", brand, 0 );
+        for (size_t i = 0; i < sizeof clocks / sizeof clocks[0]; i++)
+            if (!strncmp( brand, clocks[i].chip, strlen( clocks[i].chip ) ))
+            {
+                snprintf( v, sizeof v, "%d", clocks[i].khz );
+                setenv( "KL_CPU_MAX_KHZ", v, 0 );
+            }
+    }
+    uint64_t mem = 0; n = sizeof mem;
+    if (!sysctlbyname( "hw.memsize", &mem, &n, NULL, 0 ) && mem)
+    {
+        snprintf( v, sizeof v, "%llu", (unsigned long long)(mem >> 20) );
+        setenv( "KL_MEM_TOTAL_MB", v, 0 );
+    }
 }
