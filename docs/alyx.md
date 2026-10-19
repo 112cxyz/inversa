@@ -34,6 +34,13 @@ brew install --cask steamcmd
 steamcmd +@sSteamCmdForcePlatformType linux +force_install_dir ~/Games/alyx \
   +login <your Steam user> +app_update 546560 validate +quit
 ```
+> [!TIP]
+> You can download the Linux version using depotdownloader if you prefer it instead of steamcmd:
+> ```
+> depotdownloader --app 546560 -os linux -dir "~/Games/alyx"
+> ```
+> Reminder that you need to provide your own login methods (ex. -qr, -no-mobile)! 
+> I still recommend running the `fix_depot_links.py` script.
 
 steamcmd on macOS writes the depot's symlinks as empty files. Put them back:
 
