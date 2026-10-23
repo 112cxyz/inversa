@@ -13,7 +13,7 @@ KLEPTON := third_party/Klepton
 FEX     := third_party/FEX
 OPENOVR := third_party/OpenOVR
 BUILD   := $(abspath build)
-VERSION := 0.1.1
+VERSION := 0.1.2
 CC      := clang
 VK_INC  ?= $(shell brew --prefix vulkan-headers 2>/dev/null)/include
 INC     := -I$(KLEPTON)/runtime -I$(KLEPTON)/runtime/jni -I$(KLEPTON)/runtime/libc -I$(KLEPTON)/runtime/gfx \
@@ -85,18 +85,26 @@ $(BUILD)/Inversa.icns: tools/make_icon.swift
 	iconutil -c icns -o $@ $(BUILD)/Inversa.iconset
 
 # both executables carry the entitlement: the launcher to ask for 4K pages, the core to run in them
+# the official MoltenVK release goes in Frameworks: games whose renderer needs it (Alyx) get it
+# without a build of their own (make moltenvk)
+MVK_DYLIB := $(KLEPTON)/vendor-moltenvk/out/macos/libMoltenVK.dylib
+
 $(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.icns host/Info.plist host/entitlements.plist Makefile
 	rm -rf $@ && mkdir -p $@/Contents/MacOS $@/Contents/Resources
 	cp $(BUILD)/inversa-launch $@/Contents/MacOS/inversa
 	cp $(BUILD)/inversa $@/Contents/MacOS/inversa-core
 	cp $(BUILD)/Inversa.icns $@/Contents/Resources/
+	if [ -f $(MVK_DYLIB) ]; then mkdir -p $@/Contents/Frameworks && cp $(MVK_DYLIB) $@/Contents/Frameworks/ \
+	  && cp $(KLEPTON)/vendor-moltenvk/dist/MoltenVK/LICENSE $@/Contents/Resources/MoltenVK-LICENSE; fi
 	sed -e 's/@ID@/$(BUNDLE_ID)/' -e 's/@VERSION@/$(VERSION)/' host/Info.plist > $@/Contents/Info.plist
 	if [ -n "$(SIGN_ID)" ] && [ -f "$(PROFILE)" ]; then \
 	  cp "$(PROFILE)" $@/Contents/embedded.provisionprofile; \
+	  if [ -f $@/Contents/Frameworks/libMoltenVK.dylib ]; then codesign -f -s "$(SIGN_ID)" -o runtime --timestamp $@/Contents/Frameworks/libMoltenVK.dylib; fi; \
 	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp -i $(BUNDLE_ID) --entitlements host/entitlements.plist $@/Contents/MacOS/inversa-core; \
 	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp --entitlements host/entitlements.plist $@; \
 	else \
 	  echo "note: no Developer ID + provisioning profile: signing ad hoc (16K pages, no low memory)"; \
+	  if [ -f $@/Contents/Frameworks/libMoltenVK.dylib ]; then codesign -f -s - $@/Contents/Frameworks/libMoltenVK.dylib; fi; \
 	  codesign -f -s - $@/Contents/MacOS/inversa-core; \
 	  codesign -f -s - $@; \
 	fi

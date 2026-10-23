@@ -10,6 +10,7 @@
 #include "klepton.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mach-o/dyld.h>
 #include <spawn.h>
 #include <stdint.h>
@@ -91,18 +92,29 @@ static void ensure_4k_pages( char **argv )
     fprintf( stderr, "inversa: 4K page re-exec failed; still using %dK pages\n", getpagesize() / 1024 );
 }
 
-// Vulkan: KosmicKrisp through the Vulkan loader when Homebrew has both; INVERSA_VULKAN_DRIVER=moltenvk opts out
+// Vulkan: KosmicKrisp through the Vulkan loader when Homebrew has both, else the MoltenVK release
+// in Inversa.app's Frameworks; INVERSA_VULKAN_DRIVER=moltenvk skips KosmicKrisp
 static void vulkan_env(void)
 {
+    if (getenv( "KL_MVK_DYLIB" ) || getenv( "KL_MVK_DIR" )) return;
     const char *driver = getenv( "INVERSA_VULKAN_DRIVER" );
-    if (getenv( "KL_MVK_DYLIB" ) || getenv( "KL_MVK_DIR" ) || (driver && !strcmp( driver, "moltenvk" ))) return;
-    const char *icd = getenv( "VK_DRIVER_FILES" ), *icds[] = { "/opt/homebrew/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json" };
-    if (!icd && !access( icds[0], R_OK )) icd = icds[0];
-    if (icd && !access( "/opt/homebrew/lib/libvulkan.1.dylib", R_OK ))
+    if (!driver || strcmp( driver, "moltenvk" ))
     {
-        setenv( "KL_MVK_DYLIB", "/opt/homebrew/lib/libvulkan.1.dylib", 0 );
-        setenv( "VK_DRIVER_FILES", icd, 0 );
+        const char *icd = getenv( "VK_DRIVER_FILES" ), *icds[] = { "/opt/homebrew/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json" };
+        if (!icd && !access( icds[0], R_OK )) icd = icds[0];
+        if (icd && !access( "/opt/homebrew/lib/libvulkan.1.dylib", R_OK ))
+        {
+            setenv( "KL_MVK_DYLIB", "/opt/homebrew/lib/libvulkan.1.dylib", 0 );
+            setenv( "VK_DRIVER_FILES", icd, 0 );
+            return;
+        }
     }
+    char exe[1024], dir[1100], real[PATH_MAX]; uint32_t n = sizeof exe;
+    if (_NSGetExecutablePath( exe, &n ) || !realpath( exe, real )) return;
+    char *slash = strrchr( real, '/' ); if (slash) *slash = 0;
+    snprintf( dir, sizeof dir, "%s/../Frameworks", real );
+    snprintf( exe, sizeof exe, "%s/libMoltenVK.dylib", dir );
+    if (!access( exe, R_OK )) setenv( "KL_MVK_DIR", dir, 0 );
 }
 
 // Inversa's home is lib/'s parent: lib/arm64-root holds the arm64 libraries FEX links against,

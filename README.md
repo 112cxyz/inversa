@@ -115,4 +115,4 @@ Copyright (C) 2026 Toby Fox. Inversa is free software under the GNU General Publ
 
 ## Credits
 
-[FEX](https://github.com/FEX-Emu/FEX) and [Klepton](https://github.com/shinyquagsire23/Klepton) are both MIT licensed, and [OpenComposite](https://gitlab.com/znixian/OpenOVR) is GPL-3.0. The per-eye crop for Alyx follows [VeRantyx](https://github.com/armax9/VeRantyx) (MIT). The guest roots and sysroots are unpacked from Debian packages, each under its own licence.
+[FEX](https://github.com/FEX-Emu/FEX) and [Klepton](https://github.com/shinyquagsire23/Klepton) are both MIT licensed, and [OpenComposite](https://gitlab.com/znixian/OpenOVR) is GPL-3.0. [MoltenVK](https://github.com/KhronosGroup/MoltenVK) ships inside Inversa.app under the Apache License 2.0 (`Contents/Resources/MoltenVK-LICENSE`). The per-eye crop for Alyx follows [VeRantyx](https://github.com/armax9/VeRantyx) (MIT). The guest roots and sysroots are unpacked from Debian packages, each under its own licence.
