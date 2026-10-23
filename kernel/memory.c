@@ -40,23 +40,31 @@ static mmap_fn base_mmap;
 
 static int is_low( uintptr_t a, size_t len ) { return low_reserved > 0 && a >= LOW_START && a + len <= LOW_END && a + len > a; }
 
+// the map as bits, one per page. Big ranges are whole bytes, done a byte (or 8) at a time: a game
+// probing for a 2 GB hole (Source 2's Plat_VirtualAlloc tries ~32k hints) checks and marks 512k
+// pages per try, which bit by bit took minutes.
 static int low_any( uintptr_t a, size_t len )
 {
-    for (uintptr_t p = a; p < a + len; p += PAGE)
-    {
-        size_t i = (p - LOW_START) / PAGE;
-        if (low_pages[i / 8] & (1 << (i % 8))) return 1;
-    }
+    size_t i = (a - LOW_START) / PAGE, n = len / PAGE;
+    for (; n && (i & 7); i++, n--) if (low_pages[i / 8] & (1 << (i % 8))) return 1;
+    const uint8_t *b = low_pages + i / 8;
+    size_t bytes = n / 8;
+    for (; bytes >= 8; b += 8, bytes -= 8) { uint64_t w; memcpy( &w, b, 8 ); if (w) return 1; }
+    for (; bytes; b++, bytes--) if (*b) return 1;
+    i += n / 8 * 8; n %= 8;
+    for (; n; i++, n--) if (low_pages[i / 8] & (1 << (i % 8))) return 1;
     return 0;
 }
 
 static void low_mark( uintptr_t a, size_t len, int used )
 {
-    for (uintptr_t p = a; p < a + len; p += PAGE)
-    {
-        size_t i = (p - LOW_START) / PAGE;
+    size_t i = (a - LOW_START) / PAGE, n = len / PAGE;
+    for (; n && (i & 7); i++, n--)
         if (used) low_pages[i / 8] |= 1 << (i % 8); else low_pages[i / 8] &= ~(1 << (i % 8));
-    }
+    memset( low_pages + i / 8, used ? 0xff : 0, n / 8 );
+    i += n / 8 * 8; n %= 8;
+    for (; n; i++, n--)
+        if (used) low_pages[i / 8] |= 1 << (i % 8); else low_pages[i / 8] &= ~(1 << (i % 8));
 }
 
 static void init(void)
