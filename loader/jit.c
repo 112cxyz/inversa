@@ -85,12 +85,33 @@ void mvr_jit_unmap( void *addr, size_t len )
     pthread_mutex_unlock( &lock );
 }
 
-/* from the fault handler: 1 if the fault was the W^X switch and the access can retry */
+/* both ways at once for code that's about to write JIT memory with faults blocked (a fault
+ * handler), and for going back to running it after */
+void mvr_jit_mode( int write )
+{
+    pthread_jit_write_protect_np( write ? 0 : 1 );
+    writing = write;
+}
+
+/* from the fault handler: 1 if the fault was the W^X switch and the access can retry. JIT
+ * memory reads in either mode, so any data fault on it wants writing (atomics come in with WnR
+ * clear) and an instruction fault wants executing. The switch is set, not toggled from what
+ * this thread last chose: other code flips it (the kernel layer's rewriting) and signal delivery
+ * can bring a handler in executing, so "already writing" was sometimes wrong and FEX's handler
+ * spun on its own code-buffer lock. The same fault straight after a switch isn't the switch. */
 int mvr_jit_fault( void *addr, int is_write, int is_exec )
 {
+    static __thread uintptr_t last_addr;
+    static __thread int last_exec, repeats;
+    (void)is_write;
     if (!mvr_jit_contains( addr )) return 0;
-    if (is_write && !writing) { pthread_jit_write_protect_np( 0 ); writing = 1; return 1; }
-    if (is_exec && writing) { pthread_jit_write_protect_np( 1 ); writing = 0; return 1; }
-    if (!is_write && !is_exec) return 0;
-    return 0;
+    if ((uintptr_t)addr == last_addr && is_exec == last_exec)
+    {
+        if (++repeats > 2) { last_addr = 0; repeats = 0; return 0; }
+    }
+    else repeats = 0;
+    last_addr = (uintptr_t)addr; last_exec = is_exec;
+    pthread_jit_write_protect_np( is_exec ? 1 : 0 );
+    writing = !is_exec;
+    return 1;
 }

@@ -725,23 +725,33 @@ static void refresh_proc_maps(void)
     fclose( f );
 }
 
+// /proc/self/maps is written fresh whenever it's asked for. Mono checks it's there with access()
+// before it opens it ("Mono requires /proc to be mounted"), so that asks too.
+static void proc_maps( const char *path )
+{
+    if (!path || strcmp( path, "/proc/self/maps" )) return;
+    pthread_once( &proc_dir_once, init_proc_dir );
+    if (!proc_dir[0]) return;
+    pthread_mutex_lock( &proc_maps_lock );
+    refresh_proc_maps();
+    pthread_mutex_unlock( &proc_maps_lock );
+}
+
 static int g_open( const char *path, int flags, int mode )
 {
-    if (path && (!strcmp( path, "/proc" ) || !strcmp( path, "/proc/self/maps" )))
+    proc_maps( path );
+    if (path && !strcmp( path, "/proc" ))
     {
         pthread_once( &proc_dir_once, init_proc_dir );
-        if (proc_dir[0])
-        {
-            if (!strcmp( path, "/proc/self/maps" ))
-            {
-                pthread_mutex_lock( &proc_maps_lock );
-                refresh_proc_maps();
-                pthread_mutex_unlock( &proc_maps_lock );
-            }
-            else path = proc_dir;
-        }
+        if (proc_dir[0]) path = proc_dir;
     }
     return ((int (*)(const char *, int, int))klepton( "open" ))( path, flags, mode );
+}
+
+static int g_access( const char *path, int mode )
+{
+    proc_maps( path );
+    return ((int (*)(const char *, int))klepton( "access" ))( path, mode );
 }
 
 // glibc's sigset_t is 128 bytes; Darwin's is 4. FEX needs the pselect symbol
@@ -772,7 +782,7 @@ static const struct { const char *name; void *fn; } table[] = {
     { "fcntl", g_fcntl }, { "fcntl64", g_fcntl },
     { "eventfd", g_eventfd }, { "eventfd_write", g_eventfd_write }, { "eventfd_read", g_eventfd_read },
     { "write", g_write }, { "read", g_read }, { "close", g_close },
-    { "open", g_open },
+    { "open", g_open }, { "access", g_access },
 
     { "semget", g_semget }, { "semctl", g_semctl }, { "semop", g_semop }, { "semtimedop", g_semtimedop },
     { "dlmopen", g_dlmopen }, { "mmap", g_mmap }, { "mmap64", g_mmap }, { "munmap", g_munmap }, { "mprotect", g_mprotect },

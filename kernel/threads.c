@@ -81,6 +81,7 @@ struct fpsimd_record {
 _Static_assert( sizeof(struct fpsimd_record) == 528, "Linux fpsimd context size" );
 
 int mvr_jit_fault( void *addr, int is_write, int is_exec );
+void mvr_jit_mode( int write );
 
 static void deliver( int darwin_sig, siginfo_t *info, void *raw )
 {
@@ -96,6 +97,20 @@ static void deliver( int darwin_sig, siginfo_t *info, void *raw )
         if (mvr_jit_fault( is_exec ? (void *)ss->__pc : info->si_addr, is_write, is_exec )) return;
     }
     int sig = inv_sig_to_linux( darwin_sig );
+    // Darwin raises SIGBUS for writes to protected memory, which Linux reports as SIGSEGV;
+    // FEX write-protects guest pages it has translated and takes those writes as SIGSEGV,
+    // while a SIGBUS is an alignment fault to it (a plain store there killed Unity's Mono).
+    // Only a data abort whose fault status really is alignment (0x21) stays SIGBUS.
+    int segv_code = 0;
+    if (darwin_sig == SIGBUS)
+    {
+        uint32_t esr = host->uc_mcontext->__es.__esr, ec = esr >> 26, dfsc = esr & 0x3f;
+        if ((ec == 0x24 || ec == 0x25) && dfsc != 0x21)
+        {
+            sig = inv_sig_to_linux( SIGSEGV );
+            segv_code = (dfsc & 0x3c) == 0x0c ? 2 : 1;   // SEGV_ACCERR for permission, else SEGV_MAPERR
+        }
+    }
     if (darwin_sig == SIGSEGV || darwin_sig == SIGBUS)
         trace_fault( sig, ss->__pc, (uintptr_t)info->si_addr, host->uc_mcontext->__es.__esr,
                      sig ? actions[sig].handler : 0 );
@@ -130,7 +145,7 @@ static void deliver( int darwin_sig, siginfo_t *info, void *raw )
     uint32_t *esr = (uint32_t *)(linux.mcontext.reserved + sizeof *fp);
     esr[0] = 0x45535201; esr[1] = 16;
     *(uint64_t *)(esr + 2) = host->uc_mcontext->__es.__esr;
-    li.signo = sig; li.error = info->si_errno; li.code = info->si_code;
+    li.signo = sig; li.error = info->si_errno; li.code = segv_code ? segv_code : info->si_code;
     if (sig == 17) // SIGCHLD: pid, uid, status, utime, stime
     {
         int32_t *words = (int32_t *)li.data;
@@ -138,7 +153,14 @@ static void deliver( int darwin_sig, siginfo_t *info, void *raw )
         li.data[2] = 0; li.data[3] = 0;
     }
     else li.data[0] = (uintptr_t)info->si_addr;
+    // FEX's fault handlers patch its code buffers and take the spin lock kept in them. A write
+    // fault on that memory in here can't be delivered (the signal is blocked while its handler
+    // runs), so the kernel would retry the instruction forever: write mode for the handler,
+    // and running mode again for the code it returns to.
+    int fault = darwin_sig == SIGSEGV || darwin_sig == SIGBUS;
+    if (fault) mvr_jit_mode( 1 );
     ((void (*)(int, void *, void *))(uintptr_t)actions[sig].handler)( sig, &li, &linux );
+    if (fault) mvr_jit_mode( 0 );
     memcpy( ss->__x, linux.mcontext.regs, 29 * sizeof(uint64_t) );
     ss->__fp = linux.mcontext.regs[29]; ss->__lr = linux.mcontext.regs[30];
     ss->__sp = linux.mcontext.sp; ss->__pc = linux.mcontext.pc;

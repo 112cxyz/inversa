@@ -241,8 +241,46 @@ index 52bdba1..eed2987 100644
    CTX->ExecuteThread(ParentThread->Thread);
  
    DebugServer.reset();
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
+index 7172460..42109ce 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
+@@ -800,7 +800,33 @@ uint64_t FileManager::FAccessat2(int dirfd, const char* pathname, int mode, int
+   return ::syscall(SYSCALL_DEF(faccessat2), dirfd, SelfPath, mode, flags);
+ }
+ 
++#ifdef FEX_INVERSA
++// macOS has no /proc, so the links on the way to /proc/self/exe are answered here, for programs
++// that resolve it one component at a time (Unity): /proc/self links to the pid, and /proc and
++// /proc/<pid> are directories. thread-self goes to the process too, whose exe is the same.
++static std::optional<uint64_t> InversaProcLink(const char* Path, char* Buf, size_t Size, int PID) {
++  char Dir[32];
++  snprintf(Dir, sizeof(Dir), "/proc/%i", PID);
++  if (strcmp(Path, "/proc/self") == 0 || strcmp(Path, "/proc/thread-self") == 0) {
++    char Pid[16];
++    const size_t Len = std::min<size_t>(Size, snprintf(Pid, sizeof(Pid), "%i", PID));
++    memcpy(Buf, Pid, Len);
++    return Len;
++  }
++  if (strcmp(Path, "/proc") == 0 || strcmp(Path, Dir) == 0) {
++    errno = EINVAL;
++    return -1;
++  }
++  return std::nullopt;
++}
++#endif
++
+ uint64_t FileManager::Readlink(const char* pathname, char* buf, size_t bufsiz) {
++#ifdef FEX_INVERSA
++  if (auto Result = InversaProcLink(pathname, buf, bufsiz, CurrentPID)) {
++    return *Result;
++  }
++#endif
+   // calculate the non-self link to exe
+   // Some executables do getpid, stat("/proc/$pid/exe")
+   char PidSelfPath[50];
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432b..69d8be0 100644
+index a7a432b..36e2afb 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -44,6 +44,7 @@ $end_info$
@@ -253,7 +291,7 @@ index a7a432b..69d8be0 100644
  #include <functional>
  #include <linux/audit.h>
  #include <linux/seccomp.h>
-@@ -899,12 +900,30 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+@@ -899,12 +900,39 @@ void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
    const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
    const auto Is64Bit = Is64BitMode();
  
@@ -268,6 +306,15 @@ index a7a432b..69d8be0 100644
 +  if (GStrace) {
 +    dprintf(GStraceFD, "[guest %d] %lu(%#lx, %#lx, %#lx) ...\n", getpid(), (unsigned long)GetArg(Is64Bit, Frame, 0), (unsigned long)GetArg(Is64Bit, Frame, 1),
 +            (unsigned long)GetArg(Is64Bit, Frame, 2), (unsigned long)GetArg(Is64Bit, Frame, 3));
++    // and the path, for the x86-64 syscalls that take one: first argument, or second for the *at forms
++    const uint64_t Nr = GetArg(Is64Bit, Frame, 0);
++    const int PathArg = (Nr == 2 || Nr == 4 || Nr == 6 || Nr == 21 || Nr == 59 || Nr == 80 || Nr == 89) ? 1
++                      : (Nr == 257 || Nr == 262 || Nr == 267 || Nr == 269 || Nr == 322 || Nr == 332 || Nr == 437 || Nr == 439) ? 2 : 0;
++    if (Is64Bit && PathArg) {
++      if (const auto* Path = reinterpret_cast<const char*>(GetArg(Is64Bit, Frame, PathArg))) {
++        dprintf(GStraceFD, "[guest %d]   path \"%.512s\"\n", getpid(), Path);
++      }
++    }
 +  }
 +#endif
    // TODO: At some point these will be runtime selectable based on `syscall` versus `int 0x80` entrypoint.
@@ -299,6 +346,48 @@ index 11ff163..c86059f 100644
  template<int syscall_num>
  requires (syscall_num != -1)
  uint64_t SyscallPassthrough0(FEXCore::Core::CpuStateFrame* Frame) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 94bdd37..7c8ed0e 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -319,15 +319,23 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+     //       us to be more optimal by using GuardSignalDeferringSection instead
+     auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
+ 
++    // Inversa: guest code is only data to FEX, and executable anonymous memory on the host is
++    // MAP_JIT, whose per-thread write/execute switch FEX's own code can't satisfy while writing
++    // it (Mono's JIT spins on the fault). VMA tracking below still sees the guest's prot.
++#ifdef FEX_INVERSA
++    const int HostProt = prot & ~PROT_EXEC;
++#else
++    const int HostProt = prot;
++#endif
+     bool Map32Bit = !Is64Bit || (flags & FEX::HLE::X86_64_MAP_32BIT);
+     if (Map32Bit) {
+-      Result = (uint64_t)Get32BitAllocator()->Mmap((void*)addr, length, prot, flags, fd, offset);
++      Result = (uint64_t)Get32BitAllocator()->Mmap((void*)addr, length, HostProt, flags, fd, offset);
+       if (FEX::HLE::HasSyscallError(Result)) {
+         return reinterpret_cast<void*>(Result);
+       }
+       LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
+     } else {
+-      Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
++      Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, HostProt, flags, fd, offset));
+       if (Result == ~0ULL) {
+         return reinterpret_cast<void*>(-errno);
+       }
+@@ -473,7 +481,11 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
+ 
+   {
+     auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
++#ifdef FEX_INVERSA
++    Result = ::mprotect(addr, len, prot & ~PROT_EXEC);
++#else
+     Result = ::mprotect(addr, len, prot);
++#endif
+     if (Result == -1) {
+       return -errno;
+     }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
 index 8b9c259..2b9ed9c 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp

@@ -344,6 +344,60 @@ static long sys_futex( long uaddr, long op, long val, long timeout, long uaddr2,
             if (os_sync_wake_by_address_any( addr, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE )) break;
         return n;
     }
+    // Priority-inheritance mutexes (glibc's PTHREAD_PRIO_INHERIT; Unity's Mono uses them): the word
+    // is the owner's tid, with FUTEX_WAITERS (bit 31) set once someone waits. macOS has no
+    // priority inheritance, so these are a plain lock on the word: an unlock clears it and wakes
+    // every waiter, and each tries again, setting the waiters bit before it sleeps.
+    case 6: case 13: {     // FUTEX_LOCK_PI, FUTEX_LOCK_PI2
+        uint32_t *w = addr, tid = (uint32_t)inv_gettid();
+        uint64_t deadline = 0;
+        int clock = cmd == 6 || (op & 256) ? CLOCK_REALTIME : CLOCK_MONOTONIC;
+        if (timeout)
+        {
+            const struct timespec *ts = (const struct timespec *)timeout;
+            deadline = (uint64_t)ts->tv_sec * 1000000000ull + ts->tv_nsec;
+        }
+        for (;;)
+        {
+            uint32_t cur = __atomic_load_n( w, __ATOMIC_ACQUIRE );
+            if (!(cur & 0x3fffffff))
+            {
+                if (__atomic_compare_exchange_n( w, &cur, tid, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED )) return 0;
+                continue;
+            }
+            if ((cur & 0x3fffffff) == tid) return fail( EDEADLK );
+            if (!(cur & 0x80000000))
+            {
+                if (!__atomic_compare_exchange_n( w, &cur, cur | 0x80000000, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED )) continue;
+                cur |= 0x80000000;
+            }
+            int r;
+            if (timeout)
+            {
+                struct timespec now;
+                clock_gettime( clock, &now );
+                uint64_t n = (uint64_t)now.tv_sec * 1000000000ull + now.tv_nsec;
+                if (n >= deadline) return fail( ETIMEDOUT );
+                r = os_sync_wait_on_address_with_timeout( addr, cur, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                                           OS_CLOCK_MACH_ABSOLUTE_TIME, (deadline - n) * 3 / 125 );
+            }
+            else r = os_sync_wait_on_address( addr, cur, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE );
+            if (r < 0 && errno == EFAULT) return -1;
+        }
+    }
+    case 7: {              // FUTEX_UNLOCK_PI
+        uint32_t *w = addr, tid = (uint32_t)inv_gettid();
+        uint32_t cur = __atomic_load_n( w, __ATOMIC_RELAXED );
+        if ((cur & 0x3fffffff) != tid) return fail( EPERM );
+        cur = __atomic_exchange_n( w, 0, __ATOMIC_RELEASE );
+        if (cur & 0x80000000) os_sync_wake_by_address_all( addr, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE );
+        return 0;
+    }
+    case 8: {              // FUTEX_TRYLOCK_PI
+        uint32_t *w = addr, tid = (uint32_t)inv_gettid(), cur = 0;
+        if (__atomic_compare_exchange_n( w, &cur, tid, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED )) return 0;
+        return fail( (cur & 0x3fffffff) == tid ? EDEADLK : EAGAIN );
+    }
     }
     if (strace) fprintf( stderr, "inversa: futex op %ld not implemented\n", op );
     return fail( ENOSYS );
@@ -528,6 +582,11 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     case NR_set_robust_list: return fail( ENOSYS );
     case NR_clock_nanosleep: return sys_clock_nanosleep( a, b, c, d );
     case NR_sched_setaffinity: return 0;
+    // macOS has no real-time policies to give: Linux's priority ranges, and a requested policy
+    // is taken as given (Mono aborts when it can't set a thread's priority)
+    case NR_sched_get_priority_max: return a == 1 || a == 2 ? 99 : 0;
+    case NR_sched_get_priority_min: return a == 1 || a == 2 ? 1 : 0;
+    case NR_sched_setscheduler: return 0;
     case NR_sched_getaffinity: return sys_sched_getaffinity( a, b, c );
     case NR_kill: return kill( (pid_t)a, inv_sig_to_darwin( (int)b ) );
     case NR_tkill: return inv_tkill( a, b );
