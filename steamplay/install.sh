@@ -32,7 +32,13 @@ if [ "$1" != "--yes" ]; then
 fi
 
 mkdir -p "$dest"
-cp "$here/compatibilitytool.vdf" "$here/toolmanifest.vdf" "$here/openxr.json" "$here/run" "$dest/"
+cp "$here/compatibilitytool.vdf" "$here/toolmanifest.vdf" "$dest/"
+rm -f "$dest/openxr.json" "$dest/inversa-home"
+# a stub: the tool itself stays in the Inversa folder, so it updates whenever Inversa does
+cat > "$dest/run" <<STUB
+#!/bin/sh
+export INVERSA_HOME="$home"
+exec "$here/run" "\$@"
+STUB
 chmod +x "$dest/run"
-printf '%s\n' "$home" > "$dest/inversa-home"
 echo "Installed. Restart Steam, then pick \"Inversa (Linux build)\" in a game's Properties > Compatibility."

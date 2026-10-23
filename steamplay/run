@@ -1,6 +1,7 @@
 #!/bin/sh
 # Steam Play tool: a game's Linux build through Inversa. Steam runs it as `run <verb> <game command...>`
-# from the game's folder. install.sh writes inversa-home, the Inversa folder to use.
+# from the game's folder, through the stub install.sh leaves in Steam, so this copy (in the Inversa
+# folder, updated with Inversa) is the one that runs.
 tool="$(cd "$(dirname "$0")" && pwd)"
 verb="$1"; shift
 log="$HOME/Library/Logs/Inversa/steamplay.log"
@@ -12,7 +13,7 @@ case "$verb" in
   *) echo "steamplay: unknown verb $verb" >> "$log"; exit 1 ;;
 esac
 
-home="$(cat "$tool/inversa-home" 2>/dev/null)"
+home="${INVERSA_HOME:-$(dirname "$tool")}"
 inversa="$home/Inversa.app/Contents/MacOS/inversa"
 [ -x "$inversa" ] || { echo "steamplay: no Inversa at '$home': run install.sh again" >> "$log"; exit 1; }
 
@@ -26,6 +27,13 @@ export XR_RUNTIME_JSON="$tool/openxr.json"
 install="${STEAM_COMPAT_INSTALL_PATH:-$PWD}"
 case "$app_id" in
   546560)   # Half-Life: Alyx (tools/alyx.sh)
+    # Steam starts game/hlvr.sh, which picks the build from `uname -m`; under Inversa's x86-64
+    # bash that's the x86-64 one. The ARM64 build directly, from the game folder, no window.
+    case "$1" in */hlvr.sh)
+      game="$(cd "$(dirname "$1")" && pwd)"; install="$(dirname "$game")"; shift
+      set -- "$game/bin/linuxsteamrtarm64/hlvr" -nowindow -novid "$@"
+      cd "$game" ;;
+    esac
     export INVERSA_VULKAN_DRIVER=moltenvk OC_SHARED_FRUSTUM=1
     export MVR_LIBPATH="$install/game/bin/linuxsteamrtarm64:$install/game/hlvr/bin/linuxsteamrtarm64:$home/lib/arm64-root/usr/lib/aarch64-linux-gnu"
     ;;
