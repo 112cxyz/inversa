@@ -27,6 +27,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <mach/mach.h>
 
 void *mvr_glibc_lookup( const char *name );   // loader/glibc
 void *kl_shim_lookup( const char *name );     // Klepton
@@ -403,7 +404,68 @@ static long sys_futex( long uaddr, long op, long val, long timeout, long uaddr2,
     return fail( ENOSYS );
 }
 
+/* ---- system ---------------------------------------------------------------- */
+// Linux's struct sysinfo on 64-bit. Mesa's llvmpipe sizes itself from totalram.
+struct linux_sysinfo {
+    long uptime;
+    unsigned long loads[3], totalram, freeram, sharedram, bufferram, totalswap, freeswap;
+    unsigned short procs, pad;
+    unsigned long totalhigh, freehigh;
+    unsigned int mem_unit;
+    char reserved[4];
+};
+
+static long sys_sysinfo( long out )
+{
+    struct linux_sysinfo si = {0};
+    struct timeval boot; size_t len = sizeof boot;
+    if (!sysctlbyname( "kern.boottime", &boot, &len, NULL, 0 )) si.uptime = time( NULL ) - boot.tv_sec;
+    uint64_t mem = 0; len = sizeof mem;
+    sysctlbyname( "hw.memsize", &mem, &len, NULL, 0 );
+    si.totalram = mem;
+    vm_statistics64_data_t vm; mach_msg_type_number_t n = HOST_VM_INFO64_COUNT;
+    if (host_statistics64( mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm, &n ) == KERN_SUCCESS)
+        si.freeram = (uint64_t)(vm.free_count + vm.inactive_count) * vm_page_size;
+    double load[3];
+    if (getloadavg( load, 3 ) == 3)
+        for (int i = 0; i < 3; i++) si.loads[i] = (unsigned long)(load[i] * 65536.0);
+    si.procs = 1;
+    si.mem_unit = 1;
+    memcpy( (void *)out, &si, sizeof si );
+    return 0;
+}
+
+// memfd_create: an unlinked file, which resizes and maps like one (sealing isn't kept)
+static long sys_memfd_create( long name, long flags )
+{
+    (void)name;
+    const char *dir = getenv( "TMPDIR" );
+    char path[1024];
+    snprintf( path, sizeof path, "%s/inversa-memfd-XXXXXX", dir && *dir ? dir : "/tmp" );
+    int fd = mkstemp( path );
+    if (fd < 0) return -1;
+    unlink( path );
+    if (flags & 1) fcntl( fd, F_SETFD, FD_CLOEXEC );   // MFD_CLOEXEC
+    return fd;
+}
+
 /* ---- files ----------------------------------------------------------------- */
+// futimens(fd, times) is utimensat(fd, NULL, times, 0) on Linux; Darwin's utimensat wants a path
+// (EFAULT, which AppImages unpacking themselves hit on every file), so that form is futimens.
+// Linux's UTIME_NOW/UTIME_OMIT are 2^30-1 and 2^30-2, Darwin's -1 and -2.
+static long sys_futimens( long fd, long times )
+{
+    struct timespec ts[2];
+    if (!times) return futimens( (int)fd, NULL );
+    memcpy( ts, (const void *)times, sizeof ts );
+    for (int i = 0; i < 2; i++)
+    {
+        if (ts[i].tv_nsec == (1l << 30) - 1) ts[i].tv_nsec = UTIME_NOW;
+        else if (ts[i].tv_nsec == (1l << 30) - 2) ts[i].tv_nsec = UTIME_OMIT;
+    }
+    return futimens( (int)fd, ts );
+}
+
 // Darwin's getdirentries64 records -> Linux dirent64
 static long sys_getdents64( long fd, long buf, long count )
 {
@@ -604,6 +666,9 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     case NR_clone: return sys_clone_process( (uint64_t)a, b, c, d, e );
     case NR_execve: return inv_execveat( -100, (const char *)a, (char *const *)b, (char *const *)c, 0 );
     case NR_fadvise64: return 0;
+    case NR_sysinfo: return sys_sysinfo( a );
+    case NR_memfd_create: return sys_memfd_create( a, b );
+    case NR_utimensat: if (!b) return sys_futimens( a, c ); break;
     case NR_accept4: return sys_accept4( a, b, c, d );
     case NR_wait4: return sys_wait4( a, b, c, d );
     case NR_prlimit64: return sys_prlimit64( a, b, c, d );

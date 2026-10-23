@@ -124,6 +124,7 @@ static const char *guest_env( int machine, const char *prog, const char *dir )
     static char fex[1200];
     char path[1300];
     setenv( "KL_X18", "0", 0 );   // guest code uses x18; see the macOS 11 link in the Makefile
+    setenv( "APPIMAGE_EXTRACT_AND_RUN", "1", 0 );   // no FUSE to mount an AppImage on: unpack it and run
     inv_machine_env();
     vulkan_env();
     if (!getenv( "MVR_LIBPATH" ))
@@ -183,6 +184,40 @@ static int run_fex( kl_image *img, const char *load, int argc, char **argv )
     return fex_main( argc + 1, fargv, environ );
 }
 
+// A #! script runs on its interpreter from the x86-64 root, as Linux's exec would: Linux games
+// often start from one (Steam's run.sh). "#!/usr/bin/env bash" is the root's bash; one argument
+// after the interpreter is kept whole, as Linux does. NULL if prog isn't a script.
+static char **script_argv( const char *prog, int argc, char **argv, const char *dir, int *out_argc )
+{
+    char line[512] = {0};
+    int fd = open( prog, O_RDONLY );
+    if (fd < 0) return NULL;
+    ssize_t n = read( fd, line, sizeof line - 1 );
+    close( fd );
+    if (n < 3 || line[0] != '#' || line[1] != '!') return NULL;
+    line[n] = 0;
+    char *end = strchr( line, '\n' );
+    if (end) *end = 0;
+    char *interp = line + 2, *arg = NULL;
+    while (*interp == ' ' || *interp == '\t') interp++;
+    char *sp = strpbrk( interp, " \t" );
+    if (sp) { *sp = 0; arg = sp + 1; while (*arg == ' ' || *arg == '\t') arg++; if (!*arg) arg = NULL; }
+    if (arg) { size_t l = strlen( arg ); while (l && (arg[l - 1] == ' ' || arg[l - 1] == '\t' || arg[l - 1] == '\r')) arg[--l] = 0; }
+    char guest[600];
+    if (!strcmp( interp, "/usr/bin/env" ) && arg && !strchr( arg, ' ' )) { snprintf( guest, sizeof guest, "/usr/bin/%s", arg ); arg = NULL; }
+    else snprintf( guest, sizeof guest, "%s", interp );
+    static char host[1800];
+    snprintf( host, sizeof host, "%s/../rootfs/x86_64%s", dir, guest );
+    if (access( host, X_OK )) { fprintf( stderr, "inversa: %s wants %s, which isn't in %s/../rootfs/x86_64\n", prog, guest, dir ); return NULL; }
+    char **out = calloc( (size_t)argc + 3, sizeof *out );
+    int k = 0;
+    out[k++] = host;
+    if (arg) out[k++] = strdup( arg );
+    for (int i = 0; i < argc; i++) out[k++] = argv[i];
+    *out_argc = k;
+    return out;
+}
+
 static int usage(void)
 {
     fprintf( stderr, "usage: inversa run <program> [args...]\n       inversa probe <program>\n" );
@@ -202,6 +237,19 @@ int main( int argc, char **argv )
     int guest_argc = argc - 2;
     char **guest_argv = argv + 2;
     int machine = elf_machine( prog );
+    if (machine != EM_AARCH64 && machine != EM_X86_64 && !probe)
+    {
+        char home[1100];
+        lib_dir( home, sizeof home );
+        int script_argc;
+        char **script = script_argv( prog, guest_argc, guest_argv, home, &script_argc );
+        if (script)
+        {
+            guest_argv = script; guest_argc = script_argc;
+            prog = script[0];
+            machine = elf_machine( prog );
+        }
+    }
     if (machine != EM_AARCH64 && machine != EM_X86_64)
     {
         fprintf( stderr, "inversa: %s is not a Linux ARM64 or x86-64 program\n", prog );
