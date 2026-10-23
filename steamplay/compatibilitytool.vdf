@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "inversa"
+    {
+      "install_path" "."
+      "display_name" "Inversa (Linux build)"
+      "from_oslist" "linux"
+      "to_oslist" "macos"
+    }
+  }
+}

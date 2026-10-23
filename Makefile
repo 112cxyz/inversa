@@ -159,6 +159,7 @@ dist:
 	ditto $(BUILD)/lib/arm64-root $(DIST)/lib/arm64-root
 	ditto $(BUILD)/rootfs/x86_64 $(DIST)/rootfs/x86_64
 	if [ -d $(BUILD)/openvr ]; then ditto $(BUILD)/openvr $(DIST)/openvr; fi
+	ditto steamplay $(DIST)/steamplay
 	mkdir -p $(DIST)/licenses
 	cp licenses/README.md licenses/cereal-LICENSE licenses/glslang-LICENSE.txt $(DIST)/licenses/
 	cp LICENSE $(DIST)/licenses/Inversa-LICENSE

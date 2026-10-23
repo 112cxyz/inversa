@@ -50,7 +50,7 @@ Guest code links against a glibc ABI built over Darwin's libc (`loader/glibc`). 
 
 After `fork` the child rebuilds Klepton's mutexes and resets its JIT state before running guest code. When a guest execs another Linux program, that becomes another `inversa run`, spawned straight into 4K pages.
 
-Half-Life: Alyx's Linux ARM64 build runs in VR through MoltenVR; see [docs/alyx.md](docs/alyx.md).
+Half-Life: Alyx's Linux ARM64 build runs in VR through MoltenVR; see [docs/alyx.md](docs/alyx.md). Steam can also run Linux builds through Inversa as a Steam Play tool, once Steam Play is switched on; see [docs/steamplay.md](docs/steamplay.md).
 
 There's also an experimental ARM64 loader that runs a program on its own Linux `ld.so` and glibc (`kernel/linux.c`, `INVERSA_ARM64_LINUX=1`). It wants an ARM64 root at `build/rootfs/aarch64` or `INVERSA_ROOTFS`.
 
@@ -64,7 +64,8 @@ There's also an experimental ARM64 loader that runs a program on its own Linux `
 | `third_party/` | FEX and Klepton as submodules; `patches/` holds Inversa's changes to them |
 | `tests/` | `check.py`, the regression set, and a static x86-64 test program |
 | `bench/` | a CPU benchmark run natively, under Rosetta, Inversa and Wine |
-| `docs/` | guides ([Half-Life: Alyx](docs/alyx.md)), and the icon for this page |
+| `docs/` | guides ([Half-Life: Alyx](docs/alyx.md), [Steam Play](docs/steamplay.md)), and the icon for this page |
+| `steamplay/` | the Steam Play compatibility tool and its installer |
 | `tools/` | Debian root and sysroot fetcher, cross toolchain file, icon, FEX symboliser, `safe_run.py` |
 
 ## Testing
