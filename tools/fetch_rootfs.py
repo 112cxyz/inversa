@@ -4,15 +4,17 @@
   e.g. fetch_rootfs.py amd64 rootfs/x86_64 bash coreutils
 Packages are unpacked as is (no maintainer scripts); Debian's merged /usr symlinks are added.
 --suite takes them from another Debian release (default trixie); --nodeps unpacks only the
-packages named, for an old library dropped into a newer root."""
+packages named, for an old library dropped into a newer root. Each package's copyright file is
+kept (usr/share/doc/<package>/copyright); --copyright-only adds just those to an existing root."""
 import io, lzma, os, re, subprocess, sys, tarfile, urllib.request
 
-MIRROR, SUITE, NODEPS = "https://deb.debian.org/debian", "trixie", False
+MIRROR, SUITE, NODEPS, COPYRIGHT_ONLY = "https://deb.debian.org/debian", "trixie", False, False
 args = sys.argv[1:]
 while args and args[0].startswith("--"):
     opt = args.pop(0)
     if opt == "--suite": SUITE = args.pop(0)
     elif opt == "--nodeps": NODEPS = True
+    elif opt == "--copyright-only": COPYRIGHT_ONLY = True
     else: raise SystemExit("unknown option " + opt)
 arch, out, wanted = args[0], os.path.abspath(args[1]), args[2:]
 dl = os.path.join(os.path.dirname(out), ".debs", arch)
@@ -61,7 +63,9 @@ def unpack(name):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*" if not member.endswith(".zst") else "r:") as t:
         for m in t.getmembers():
             name_ = m.name[2:] if m.name.startswith("./") else m.name
-            if name_.startswith(("usr/share/doc", "usr/share/man", "usr/share/info", "usr/share/locale")): continue
+            copyright = re.fullmatch(r"usr/share/doc/[^/]+/copyright", name_) is not None
+            if COPYRIGHT_ONLY and not copyright: continue
+            if name_.startswith(("usr/share/doc", "usr/share/man", "usr/share/info", "usr/share/locale")) and not copyright: continue
             dest = os.path.join(out, name_)
             if m.isdir(): os.makedirs(dest, exist_ok=True)
             elif m.issym() or m.islnk():

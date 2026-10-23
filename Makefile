@@ -159,6 +159,13 @@ dist:
 	ditto $(BUILD)/lib/arm64-root $(DIST)/lib/arm64-root
 	ditto $(BUILD)/rootfs/x86_64 $(DIST)/rootfs/x86_64
 	if [ -d $(BUILD)/openvr ]; then ditto $(BUILD)/openvr $(DIST)/openvr; fi
+	mkdir -p $(DIST)/licenses
+	cp licenses/README.md licenses/cereal-LICENSE licenses/glslang-LICENSE.txt $(DIST)/licenses/
+	cp LICENSE $(DIST)/licenses/Inversa-LICENSE
+	cp third_party/FEX/LICENSE $(DIST)/licenses/FEX-LICENSE
+	cp $(KLEPTON)/LICENSE $(DIST)/licenses/Klepton-LICENSE
+	for f in LICENSE.txt LICENSE_OPENVR.txt LICENSE_INIH.txt; do cp third_party/OpenOVR/$$f $(DIST)/licenses/OpenComposite-$$f; done
+	cp $(KLEPTON)/vendor-moltenvk/dist/MoltenVK/LICENSE $(DIST)/licenses/MoltenVK-LICENSE
 	cd $(BUILD)/dist && ditto -c -k --keepParent Inversa Inversa-$(VERSION).zip
 	shasum -a 256 $(BUILD)/dist/Inversa-$(VERSION).zip
 
