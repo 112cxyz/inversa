@@ -20,11 +20,14 @@ int main( int argc, char **argv )
     strcpy( slash, "/inversa-core" );
     if (getpagesize() != 0x1000 && !getenv( "INVERSA_NO_4K" ) && has_xarch_entitlement())
     {
-        posix_spawnattr_t attr;
-        posix_spawnattr_init( &attr );
-        posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC );
-        posix_spawnattr_set_4k_page_size_np( &attr );
-        posix_spawn( NULL, core, NULL, &attr, argv, environ );
+        if (__builtin_available( macOS 26.0, * ))
+        {
+            posix_spawnattr_t attr;
+            posix_spawnattr_init( &attr );
+            posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC );
+            posix_spawnattr_set_4k_page_size_np( &attr );
+            posix_spawn( NULL, core, NULL, &attr, argv, environ );
+        }
     }
     execve( core, argv, environ );   // no entitlement (or the 4K spawn failed): the core says why
     perror( core );

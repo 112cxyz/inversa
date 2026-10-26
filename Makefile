@@ -13,7 +13,7 @@ KLEPTON := third_party/Klepton
 FEX     := third_party/FEX
 OPENOVR := third_party/OpenOVR
 BUILD   := $(abspath build)
-VERSION := 0.1.4
+VERSION := 0.1.5
 CC      := clang
 VK_INC  ?= $(shell brew --prefix vulkan-headers 2>/dev/null)/include
 INC     := -I$(KLEPTON)/runtime -I$(KLEPTON)/runtime/jni -I$(KLEPTON)/runtime/libc -I$(KLEPTON)/runtime/gfx \
@@ -76,7 +76,7 @@ $(BUILD)/inversa: $(SRCS) $(LOADER) $(wildcard host/*.h kernel/*.h loader/*.h lo
 # the bundle's executable is a small launcher that starts inversa-core in a 4K-page process
 $(BUILD)/inversa-launch: host/launch.c host/entitlement.h
 	@mkdir -p $(BUILD)
-	$(CC) -O2 -arch arm64 -o $@ $< -framework Security -framework CoreFoundation
+	$(CC) -O2 -arch arm64 -mmacosx-version-min=11.0 -o $@ $< -framework Security -framework CoreFoundation
 
 $(BUILD)/Inversa.icns: tools/make_icon.swift
 	@mkdir -p $(BUILD)

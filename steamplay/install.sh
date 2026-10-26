@@ -34,11 +34,22 @@ fi
 mkdir -p "$dest"
 cp "$here/compatibilitytool.vdf" "$here/toolmanifest.vdf" "$dest/"
 rm -f "$dest/openxr.json" "$dest/inversa-home"
-# a stub: the tool itself stays in the Inversa folder, so it updates whenever Inversa does
+# a stub: the tool itself stays in the Inversa folder, so it updates whenever Inversa does. If that
+# folder is moved or deleted (an unzipped download), MoltenVR's copy of Inversa stands in.
 cat > "$dest/run" <<STUB
 #!/bin/sh
-export INVERSA_HOME="$home"
-exec "$here/run" "\$@"
+home="$home" tool="$here/run"
+if [ ! -x "\$tool" ]; then
+  home="\$HOME/Library/Application Support/MoltenVR/inversa-runtime" tool="\$home/steamplay/run"
+fi
+if [ ! -x "\$tool" ]; then
+  log="\$HOME/Library/Logs/Inversa/steamplay.log"
+  mkdir -p "\$(dirname "\$log")"
+  echo "=== \$(date): no Inversa at '$here' or in MoltenVR: run steamplay/install.sh again from an Inversa folder" >> "\$log"
+  exit 1
+fi
+export INVERSA_HOME="\$home"
+exec "\$tool" "\$@"
 STUB
 chmod +x "$dest/run"
 echo "Installed. Restart Steam, then pick \"Inversa (Linux build)\" in a game's Properties > Compatibility."
