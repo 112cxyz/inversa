@@ -226,7 +226,8 @@ static int usage(void)
 {
     fprintf( stderr, "usage: inversa run <program> [args...]\n"
                      "       inversa probe <program>\n"
-                     "       inversa bash [-n name] [bash args...]\n" );
+                     "       inversa bash [-n name] [bash args...]\n"
+                     "       inversa apk <file.apk | package> [--vr]\n" );
     return 2;
 }
 
@@ -239,6 +240,12 @@ int main( int argc, char **argv )
         char home[1100];
         lib_dir( home, sizeof home );
         return inv_bash( argc - 2, argv + 2, home );
+    }
+    if (argc >= 2 && !strcmp( argv[1], "apk" ))
+    {
+        char home[1100];
+        lib_dir( home, sizeof home );
+        return inv_apk( argc - 2, argv + 2, home );
     }
     if (argc < 3) return usage();
     if (getenv( "INVERSA_CONTAINER" ))

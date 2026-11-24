@@ -8,7 +8,8 @@ A release also carries these, each under its own licence:
 | Part | Where | Licence | Source |
 |---|---|---|---|
 | FEX | `lib/libFEXInversa.so` | MIT (`FEX-LICENSE`) | <https://github.com/FEX-Emu/FEX> |
-| Klepton | linked into `Inversa.app` | MIT (`Klepton-LICENSE`) | <https://github.com/shinyquagsire23/Klepton> |
+| Klepton | linked into `Inversa.app`, and its frontend as `Inversa.app/Contents/MacOS/klepton` | MIT (`Klepton-LICENSE`) | <https://github.com/shinyquagsire23/Klepton> |
+| OpenXR headers 1.1.60 | built into `klepton` | Apache-2.0 OR MIT | <https://github.com/KhronosGroup/OpenXR-SDK> |
 | OpenComposite | `openvr/` | GPL-3.0 (`OpenComposite-LICENSE.txt`, with `OpenComposite-LICENSE_OPENVR.txt` and `OpenComposite-LICENSE_INIH.txt` for the parts it includes) | <https://gitlab.com/armax9/OpenOVR> |
 | MoltenVK 1.4.2 | `Inversa.app/Contents/Frameworks` | Apache-2.0 (`MoltenVK-LICENSE`) | <https://github.com/KhronosGroup/MoltenVK> |
 | SPIRV-Cross, SPIRV-Tools (in MoltenVK) | | Apache-2.0 (`MoltenVK-LICENSE`) | <https://github.com/KhronosGroup/SPIRV-Cross>, <https://github.com/KhronosGroup/SPIRV-Tools> |

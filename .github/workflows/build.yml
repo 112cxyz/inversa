@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Tools
-        run: brew install llvm lld ninja vulkan-headers
+        run: brew install llvm lld ninja vulkan-headers pkg-config sdl3
       - name: FEX and Klepton at their pinned commits, patched
         run: tools/setup.sh
       - name: Debian package cache

@@ -9,6 +9,8 @@
 #   make moltenvk        the official MoltenVK release, for games that don't run on KosmicKrisp yet
 #   make notarize        Apple's notary check on build/Inversa.app, ticket stapled
 #   make dist            build/dist/Inversa-$(VERSION).zip: the app, lib/, the x86-64 root and OpenComposite
+# inversa apk also wants apktool and SDL3 (brew install apktool sdl3), adb for pulling from a Quest,
+# and ANGLE (Klepton's make angle-all) for GLES games
 KLEPTON := third_party/Klepton
 FEX     := third_party/FEX
 OPENOVR := third_party/OpenOVR
@@ -24,7 +26,7 @@ LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio -framework VideoTool
            -framework IOSurface -framework Security -framework CoreFoundation -framework AVFoundation -framework Foundation
 LOADER  := $(addprefix loader/,crash.c deps.c steam.c jit.c glibc/glibc.c glibc/glibc_ext.c glibc/glibc_va.S \
            tls/mvr_tls.c tls/mvr_tls.S tls/mvr_enter.S)
-SRCS    := host/inversa.c host/cpu.c host/bash.c kernel/kernel.c kernel/libc.c kernel/memory.c kernel/files.c kernel/threads.c kernel/linux.c kernel/ioctl.c kernel/exec.c kernel/container.c
+SRCS    := host/inversa.c host/cpu.c host/bash.c host/apk.c kernel/kernel.c kernel/libc.c kernel/memory.c kernel/files.c kernel/threads.c kernel/linux.c kernel/ioctl.c kernel/exec.c kernel/container.c
 
 # Developer ID + the cross-architecture entitlement (memory below 4 GB, 4K pages) need its
 # provisioning profile; without them the bundle is signed ad hoc and runs with 16K pages
@@ -89,10 +91,19 @@ $(BUILD)/Inversa.icns: tools/make_icon.swift
 # without a build of their own (make moltenvk)
 MVK_DYLIB := $(KLEPTON)/vendor-moltenvk/out/macos/libMoltenVK.dylib
 
-$(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.icns host/Info.plist host/entitlements.plist Makefile
+# Klepton's own frontend, for Android APKs (inversa apk): a window, or MoltenVR with KL_MVR=1.
+# The sub-make decides whether it's out of date
+KLBOOT := $(KLEPTON)/build/m_boot
+.PHONY: $(KLBOOT)
+$(KLBOOT):
+	$(MAKE) -C $(KLEPTON) build/m_boot MVR_XR_INC=$(CURDIR)/third_party/openxr/include \
+	  MVK_INC="-Ivendor-moltenvk/out/include -I$(VK_INC)"
+
+$(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.icns $(KLBOOT) host/Info.plist host/entitlements.plist Makefile
 	rm -rf $@ && mkdir -p $@/Contents/MacOS $@/Contents/Resources
 	cp $(BUILD)/inversa-launch $@/Contents/MacOS/inversa
 	cp $(BUILD)/inversa $@/Contents/MacOS/inversa-core
+	cp $(KLBOOT) $@/Contents/MacOS/klepton
 	cp $(BUILD)/Inversa.icns $@/Contents/Resources/
 	if [ -f $(MVK_DYLIB) ]; then mkdir -p $@/Contents/Frameworks && cp $(MVK_DYLIB) $@/Contents/Frameworks/ \
 	  && cp $(KLEPTON)/vendor-moltenvk/dist/MoltenVK/LICENSE $@/Contents/Resources/MoltenVK-LICENSE; fi
@@ -101,11 +112,13 @@ $(BUILD)/Inversa.app: $(BUILD)/inversa $(BUILD)/inversa-launch $(BUILD)/Inversa.
 	  cp "$(PROFILE)" $@/Contents/embedded.provisionprofile; \
 	  if [ -f $@/Contents/Frameworks/libMoltenVK.dylib ]; then codesign -f -s "$(SIGN_ID)" -o runtime --timestamp $@/Contents/Frameworks/libMoltenVK.dylib; fi; \
 	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp -i $(BUNDLE_ID) --entitlements host/entitlements.plist $@/Contents/MacOS/inversa-core; \
+	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp -i $(BUNDLE_ID) --entitlements host/entitlements.plist $@/Contents/MacOS/klepton; \
 	  codesign -f -s "$(SIGN_ID)" -o runtime --timestamp --entitlements host/entitlements.plist $@; \
 	else \
 	  echo "note: no Developer ID + provisioning profile: signing ad hoc (16K pages, no low memory)"; \
 	  if [ -f $@/Contents/Frameworks/libMoltenVK.dylib ]; then codesign -f -s - $@/Contents/Frameworks/libMoltenVK.dylib; fi; \
 	  codesign -f -s - $@/Contents/MacOS/inversa-core; \
+	  codesign -f -s - $@/Contents/MacOS/klepton; \
 	  codesign -f -s - $@; \
 	fi
 
