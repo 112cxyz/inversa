@@ -24,7 +24,7 @@ LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio -framework VideoTool
            -framework IOSurface -framework Security -framework CoreFoundation -framework AVFoundation -framework Foundation
 LOADER  := $(addprefix loader/,crash.c deps.c steam.c jit.c glibc/glibc.c glibc/glibc_ext.c glibc/glibc_va.S \
            tls/mvr_tls.c tls/mvr_tls.S tls/mvr_enter.S)
-SRCS    := host/inversa.c host/cpu.c kernel/kernel.c kernel/libc.c kernel/memory.c kernel/files.c kernel/threads.c kernel/linux.c kernel/ioctl.c kernel/exec.c
+SRCS    := host/inversa.c host/cpu.c host/bash.c kernel/kernel.c kernel/libc.c kernel/memory.c kernel/files.c kernel/threads.c kernel/linux.c kernel/ioctl.c kernel/exec.c kernel/container.c
 
 # Developer ID + the cross-architecture entitlement (memory below 4 GB, 4K pages) need its
 # provisioning profile; without them the bundle is signed ad hoc and runs with 16K pages
@@ -130,7 +130,7 @@ moltenvk:
 	$(MAKE) -C $(KLEPTON) mvk
 
 rootfs:
-	python3 tools/fetch_rootfs.py amd64 $(BUILD)/rootfs/x86_64 bash coreutils
+	python3 tools/fetch_rootfs.py amd64 $(BUILD)/rootfs/x86_64 bash coreutils ncurses-base grep sed findutils
 	python3 tools/fetch_rootfs.py arm64 $(BUILD)/lib/arm64-root libstdc++6 libgcc-s1
 
 # what a Steam Linux Runtime game expects but doesn't ship (ICU 67 for Alyx's V8 only exists in bullseye)

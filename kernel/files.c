@@ -71,7 +71,7 @@ long inv_openat2( long dirfd, const char *path, const uint64_t *how, size_t size
     if (size < 24) { errno = EINVAL; return -1; }
     uint64_t flags = how[0], mode = how[1], res = how[2];
     typedef int (*openat_fn)( int, const char *, int, int );
-    openat_fn op = (openat_fn)mvr_glibc_lookup( "openat" );
+    openat_fn op = (openat_fn)inv_libc_plain( "openat" );
     if (!op) op = (openat_fn)kl_shim_lookup( "openat" );
     if (!(res & (RESOLVE_IN_ROOT | RESOLVE_BENEATH)))
         return op( (int)dirfd, path, (int)flags, (int)mode );   // nothing to confine

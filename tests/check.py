@@ -26,6 +26,11 @@ CASES = [
     ("fork-then-subst", [BASH, "-c", "( echo a ); echo $(echo b)"], 0, "a\nb"),
     ("nested-subst", [BASH, "-c", "echo $( echo $( echo two ) )"], 0, "two"),
     ("sha256", [BASH, "-c", "head -c 50000000 /dev/zero | sha256sum"], 0, ZEROS_SHA256),
+    ("grep", [BASH, "-c", "grep -c root /proc/self/../../etc/passwd 2>/dev/null; grep -c . /dev/null; echo done"], 0, "done"),
+    # inversa bash: a container named "check", made on first use; / is its own and the Mac's isn't there
+    ("container-root", ["bash", "-n", "check", "-c", "test -d /Applications || test -d /Users || echo sealed; pwd"], 0, "sealed\n/home/"),
+    ("container-mac", ["bash", "-n", "check", "-c", "test -f /mnt/mac/.zshrc -o -d /mnt/mac/Library && echo mac"], 0, "mac"),
+    ("container-files", ["bash", "-n", "check", "-c", "mkdir -p /tmp/a/b && echo x > /tmp/a/b/f && mv /tmp/a/b/f /tmp/a/g && cat /tmp/a/g && cd / && cd .. && pwd"], 0, "x\n/"),
 ]
 
 # a second fork that runs bash code without exec hangs on its pipe (or exits 232)
@@ -35,7 +40,7 @@ KNOWN_FAILURES = {"fork-then-subst", "nested-subst"}
 def run(name, argv, status, expect, logdir):
     log = os.path.join(logdir, name + ".log")
     rc = subprocess.run([sys.executable, os.path.join(ROOT, "tools/safe_run.py"), "--timeout", "20",
-                         "--log", log, "--", INVERSA, "run", *argv]).returncode
+                         "--log", log, "--", INVERSA, *([] if argv[0] == "bash" else ["run"]), *argv]).returncode
     with open(log, errors="replace") as f:
         out = f.read()
     ok = rc == status and expect in out

@@ -178,3 +178,29 @@ long inv_mprotect( void *addr, size_t len, long prot )
     if (inv_x86_mode && !mvr_jit_contains( addr )) return mprotect( addr, len, (int)(prot & ~PROT_EXEC) );
     return base( addr, len, prot );
 }
+
+// Linux's mincore fails with ENOMEM on any unmapped page, and programs walk memory with it
+// (gnulib finds the stack's extent that way); Darwin's says 0 and fills the vector
+long inv_mincore( void *addr, size_t len, unsigned char *vec )
+{
+    if ((uintptr_t)addr & 0xfff) { errno = EINVAL; return -1; }
+    mach_vm_address_t at = (mach_vm_address_t)(uintptr_t)addr, end = at + len;
+    while (at < end)
+    {
+        mach_vm_address_t region = at;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object;
+        if (mach_vm_region( mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+                            &count, &object ) != KERN_SUCCESS || region > at)
+        {
+            errno = ENOMEM;
+            return -1;
+        }
+        at = region + size;
+    }
+    memset( vec, 1, (len + 0xfff) >> 12 );
+    return 0;
+}
+

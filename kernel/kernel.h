@@ -28,6 +28,7 @@ long inv_ioctl(long fd, long request, long arg);
 void *inv_mmap(void *addr, size_t len, long prot, long flags, long fd, long off);
 long inv_munmap(void *addr, size_t len);
 long inv_mprotect(void *addr, size_t len, long prot);
+long inv_mincore(void *addr, size_t len, unsigned char *vec);
 
 // threads.c: threads and signals
 long inv_gettid(void);
@@ -38,6 +39,16 @@ int  inv_sig_to_linux(int darwin_sig);
 const void *inv_guest_action(int linux_sig);       // the guest's struct k_sigaction
 void inv_signal_installed(int linux_sig, const void *action);
 void inv_signal_after_fork_child(void);
+
+// container.c: inversa bash, a guest kept inside its own root (INVERSA_CONTAINER)
+#include <limits.h>
+extern int inv_container;
+void inv_container_init(const char *inversa_home);
+const char *inv_container_path(const char *path, char *buf);
+void inv_container_args(long nr, long *args, char (*bufs)[PATH_MAX]);
+void inv_container_after(long nr, const long *args, long result);
+void *inv_container_lookup(const char *name);
+void *inv_libc_plain(const char *name);   // the glibc layer's function, never a container wrapper
 
 // linux.c: the ARM64 loader (INVERSA_ARM64_LINUX=1)
 int  inv_linux_run(const char *path, int argc, char **argv, const char *guest_root);

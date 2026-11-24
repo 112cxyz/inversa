@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -37,8 +38,7 @@ void mvr_jit_after_fork_child( void );        // loader/jit.c
 // the guest libc as a guest sees it: the glibc layer's overrides, then Klepton's own table
 static void *libc_fn( const char *name )
 {
-    void *p = mvr_glibc_lookup( name );
-    return p ? p : kl_shim_lookup( name );
+    return inv_libc_plain( name );
 }
 
 typedef long (*sysfn)( long, long, long, long, long, long );
@@ -155,7 +155,7 @@ static const struct { const char *sys, *fn; } same[] = {
     { "flock", 0 }, { "getxattr", 0 }, { "lgetxattr", 0 }, { "fgetxattr", 0 }, { "listxattr", 0 },
     { "setuid", 0 }, { "setgid", 0 }, { "setreuid", 0 }, { "setregid", 0 }, { "getgroups", 0 },
     { "sched_getscheduler", 0 }, { "sched_getparam", 0 }, { "sched_setparam", 0 },
-    { "getpriority", 0 }, { "setpriority", 0 }, { "times", 0 }, { "mincore", 0 },
+    { "getpriority", 0 }, { "setpriority", 0 }, { "times", 0 },
 };
 
 // libc functions returning 64-bit values; every other one returns int, whose -1 must be
@@ -254,6 +254,15 @@ static long sys_linkat( long olddir, long oldpath, long newdir, long newpath, lo
     return linkat( olddir == -100 ? AT_FDCWD : (int)olddir, (const char *)oldpath,
                    newdir == -100 ? AT_FDCWD : (int)newdir, (const char *)newpath,
                    flags & 0x400 ? AT_SYMLINK_FOLLOW : 0 );
+}
+
+// RENAME_NOREPLACE and RENAME_EXCHANGE are Darwin's RENAME_EXCL and RENAME_SWAP
+static long sys_renameat2( long olddir, long oldpath, long newdir, long newpath, long flags )
+{
+    if (flags & ~3L || flags == 3) return fail( EINVAL );
+    unsigned darwin = (flags & 1 ? RENAME_EXCL : 0) | (flags & 2 ? RENAME_SWAP : 0);
+    return renameatx_np( olddir == -100 ? AT_FDCWD : (int)olddir, (const char *)oldpath,
+                         newdir == -100 ? AT_FDCWD : (int)newdir, (const char *)newpath, darwin );
 }
 
 // struct k_sigaction for arm64: handler, flags, restorer, mask
@@ -632,6 +641,17 @@ static long dispatch( long nr, long a, long b, long c, long d, long e, long f )
     case NR_getcwd: return getcwd( (char *)a, (size_t)b ) ? (long)strlen( (char *)a ) + 1 : -1;
     case NR_ioctl: return inv_ioctl( a, b, c );
     case NR_linkat: return sys_linkat( a, b, c, d, e );
+    case NR_renameat2: return sys_renameat2( a, b, c, d, e );
+    case NR_copy_file_range: return fail( EXDEV );
+    case NR_faccessat2:
+        if (d & ~0x1300L) return fail( EINVAL );
+        if ((d & 0x1000) && !*(const char *)b) return fcntl( (int)a, F_GETFD ) < 0 ? -1 : 0;   // AT_EMPTY_PATH: the fd itself
+        return faccessat( a == -100 ? AT_FDCWD : (int)a, (const char *)b, (int)c,
+                          (d & 0x200 ? AT_EACCESS : 0) | (d & 0x100 ? AT_SYMLINK_NOFOLLOW : 0) );
+    case NR_setfsuid: return getuid();   // the previous fsuid, which is the uid: there is no other
+    case NR_setfsgid: return getgid();
+    case NR_mincore: return inv_mincore( (void *)a, (size_t)b, (unsigned char *)c );   // cp and friends fall back to read and write
+    case NR_fchmodat: return fchmodat( a == -100 ? AT_FDCWD : (int)a, (const char *)b, (mode_t)c, 0 );   // the syscall has no flags
     case NR_openat: return sys_openat( a, b, c, d );
     case NR_getdents64: return sys_getdents64( a, b, c );
     case NR_pselect6: return sys_pselect6( a, b, c, d, e, f );
@@ -729,7 +749,10 @@ long inv_syscall( long nr, long a, long b, long c, long d, long e, long f )
     int p = path_arg( nr );
     char rooted[4096];
     if (inv_arm64_mode && p >= 0) args[p] = (long)inv_guest_path( (const char *)args[p], rooted );
+    char contained[2][PATH_MAX];
+    if (inv_container) inv_container_args( nr, args, contained );
     long r = dispatch( nr, args[0], args[1], args[2], args[3], args[4], args[5] );
+    if (inv_container) { int err = errno; inv_container_after( nr, args, r ); errno = err; }
     if (strace)
     {
         int err = errno;

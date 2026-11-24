@@ -2,12 +2,14 @@
 // loader/), x86-64 ones through FEX built for that same layer, over Inversa's Linux kernel.
 //   inversa run <program> [args...]
 //   inversa probe <program>          load it and list what doesn't resolve
+//   inversa bash [-n name] [args]    a shell in a Linux root of its own (bash.c)
 #include "../kernel/kernel.h"
 #include "deps.h"
 #include "entitlement.h"
 #include "glibc/glibc.h"
 #include "tls/mvr_tls.h"
 #include "klepton.h"
+#include "commands.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -207,7 +209,9 @@ static char **script_argv( const char *prog, int argc, char **argv, const char *
     if (!strcmp( interp, "/usr/bin/env" ) && arg && !strchr( arg, ' ' )) { snprintf( guest, sizeof guest, "/usr/bin/%s", arg ); arg = NULL; }
     else snprintf( guest, sizeof guest, "%s", interp );
     static char host[1800];
-    snprintf( host, sizeof host, "%s/../rootfs/x86_64%s", dir, guest );
+    char mapped[PATH_MAX];
+    if (inv_container) snprintf( host, sizeof host, "%s", inv_container_path( guest, mapped ) );
+    else snprintf( host, sizeof host, "%s/../rootfs/x86_64%s", dir, guest );
     if (access( host, X_OK )) { fprintf( stderr, "inversa: %s wants %s, which isn't in %s/../rootfs/x86_64\n", prog, guest, dir ); return NULL; }
     char **out = calloc( (size_t)argc + 3, sizeof *out );
     int k = 0;
@@ -220,7 +224,9 @@ static char **script_argv( const char *prog, int argc, char **argv, const char *
 
 static int usage(void)
 {
-    fprintf( stderr, "usage: inversa run <program> [args...]\n       inversa probe <program>\n" );
+    fprintf( stderr, "usage: inversa run <program> [args...]\n"
+                     "       inversa probe <program>\n"
+                     "       inversa bash [-n name] [bash args...]\n" );
     return 2;
 }
 
@@ -228,7 +234,20 @@ int main( int argc, char **argv )
 {
     start_clock();
     inv_time_mark( "main" );
+    if (argc >= 2 && !strcmp( argv[1], "bash" ))
+    {
+        char home[1100];
+        lib_dir( home, sizeof home );
+        return inv_bash( argc - 2, argv + 2, home );
+    }
     if (argc < 3) return usage();
+    if (getenv( "INVERSA_CONTAINER" ))
+    {
+        char home[1100], parent[1200];
+        lib_dir( home, sizeof home );
+        snprintf( parent, sizeof parent, "%s/..", home );
+        inv_container_init( parent );
+    }
     int probe = !strcmp( argv[1], "probe" );
     if (!probe && strcmp( argv[1], "run" )) return usage();
     // probing loads and resolves only: no constructors, so no guest code runs
@@ -236,6 +255,9 @@ int main( int argc, char **argv )
     const char *prog = argv[2];
     int guest_argc = argc - 2;
     char **guest_argv = argv + 2;
+    char mapped[PATH_MAX];
+    // in a container the program is named by its guest path; FEX finds it in the root itself
+    if (inv_container) prog = inv_container_path( prog, mapped );
     int machine = elf_machine( prog );
     if (machine != EM_AARCH64 && machine != EM_X86_64 && !probe)
     {

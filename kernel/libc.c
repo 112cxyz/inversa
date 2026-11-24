@@ -85,6 +85,8 @@ static const struct { const char *name; void *fn; } table[] = {
 
 void *inv_libc_lookup( const char *name )
 {
+    void *wrapped = inv_container_lookup( name );
+    if (wrapped) return wrapped;
     for (size_t i = 0; i < sizeof table / sizeof table[0]; i++)
         if (!strcmp( table[i].name, name )) return table[i].fn;
     return NULL;
